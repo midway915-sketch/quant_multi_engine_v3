@@ -1,40 +1,45 @@
 data:
-  # Base universe (UNLEVERED tickers only)
-  tickers: ["QQQ","SPY","TLT","GLD","SHY","SOXX"]
+  tickers: ["SPY","QQQ","SOXX","SHY","GLD"]
   start: "2000-01-01"
 
 portfolio:
   rebalance: "weekly"
   when: "week_end"      # W-FRI
-  entry: "next_close"   # signals at t used for holdings from t+1 (implemented via shift)
+  entry: "next_close"   # signals at t used from t+1
 
-selection:
-  top_n: 2
-  lookback_days: 126
+state:
+  base_ticker: "SPY"
+  ma_days: 200
+  min_hold_days: 5
 
-regime:
+crash:
   enabled: true
-  ma_fast: 50
-  ma_slow: 200
+  lookback_days: 20
+  threshold: -0.15
 
-risk_off:
-  enabled: true
-  mode: "SHY_70_GLD_30"   # SHY_100, SHY_GLD_50_50, SHY_70_GLD_30, GLD_100
+trend_engine:
+  universe: ["QQQ","SPY","SOXX"]
+  mom_lookback_days: 126
+  top_n: 1
+  leverage_mode: "proxy_3x"
 
-# NEW/UPDATED: leveraged execution options
-leverage_etf:
-  enabled: true
-  # "real"  = use actual 3x ETFs (TQQQ/UPRO/TMF...) => will shorten history
-  # "proxy" = synthesize 3x series from base tickers (daily return * 3) => 2000+ history
-  mode: "proxy"
+meanrev_engine:
+  base_ticker: "SPY"
+  lookback_days: 20
+  drop_threshold: -0.15
+  hold_days: 10
+  take_profit: 0.10
+  stop_loss: -0.08
+  leverage: 1.5
 
-  use_3x_in_strong: true
-  use_3x_in_weak: false
+defensive_engine:
+  mode: "SHY"  # "SHY" or "CASH"
 
-  # base -> traded ticker mapping
-  # In proxy mode, tickers ending with _PROXY are created synthetically from the base ticker.
-  map:
-    QQQ: "TQQQ_PROXY"
-    SPY: "UPRO_PROXY"
-    TLT: "TMF_PROXY"
-    SOXX: "SOXL_PROXY"
+allocator:
+  bull:   {trend: 0.70, meanrev: 0.10, defensive: 0.20}
+  bear:   {trend: 0.35, meanrev: 0.15, defensive: 0.50}
+  crash:  {trend: 0.10, meanrev: 0.40, defensive: 0.50}
+
+costs:
+  buy: 0.0007
+  sell: 0.0007
