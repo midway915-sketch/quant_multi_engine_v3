@@ -1,0 +1,60 @@
+name: run-grid-fast
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: "Base config yml"
+        required: true
+        default: "config/default.yml"
+      grid_path:
+        description: "Grid config yml"
+        required: true
+        default: "config/grid_fast.yml"
+      out_dir:
+        description: "Output directory"
+        required: true
+        default: "out/grid_fast"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run grid (fast)
+        run: |
+          mkdir -p "${{ inputs.out_dir }}"
+          python scripts/run_grid.py \
+            --config "${{ inputs.config_path }}" \
+            --grid "${{ inputs.grid_path }}" \
+            --out "${{ inputs.out_dir }}"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-fast-results
+          if-no-files-found: error
+          path: |
+            ${{ inputs.out_dir }}/prices.csv
+            ${{ inputs.out_dir }}/summary.csv
+            ${{ inputs.out_dir }}/best_params.json
+            ${{ inputs.out_dir }}/metrics.json
+            ${{ inputs.out_dir }}/equity_curve.csv
+            ${{ inputs.out_dir }}/engine_choice_log.csv
+            ${{ inputs.out_dir }}/picks_top2_weekly.csv
