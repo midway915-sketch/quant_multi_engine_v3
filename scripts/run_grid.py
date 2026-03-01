@@ -1,110 +1,142 @@
-
+from __future__ import annotations
 import argparse
-import itertools
+import json
 import os
 import time
-import json
+import itertools
 import yaml
 import pandas as pd
 
-from src.core.data import download_prices
-from src.core.utils import deep_set
-from src.core.strategy import run_backtest
-from src.core.metrics import cagr, mdd
+from src.core.data import download_prices_and_build_proxies
+from src.core.utils import deep_set, flatten_grid, deep_copy
+from src.core.meta import run_meta_portfolio
+from src.core.metrics import compute_metrics
 
-def load_yaml(path):
+
+def load_yaml(path: str):
     with open(path, "r") as f:
         return yaml.safe_load(f)
 
+
+def save_json(path: str, obj):
+    with open(path, "w") as f:
+        json.dump(obj, f, indent=2)
+
+
+def _validate_weights(cfg) -> bool:
+    for k in ["bull", "bear", "crash"]:
+        w = cfg["allocator"][k]
+        s = float(w["trend"]) + float(w["meanrev"]) + float(w["defensive"])
+        if abs(s - 1.0) > 1e-9:
+            return False
+        if min(w["trend"], w["meanrev"], w["defensive"]) < 0:
+            return False
+    return True
+
+
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True, help="Base config yml")
-    ap.add_argument("--grid", required=True, help="Grid config yml (dot-notation keys)")
-    ap.add_argument("--out", required=True, help="Output directory")
-    ap.add_argument("--save-picks", action="store_true", help="Save picks_top2_weekly.csv for best run")
+    ap.add_argument("--config", required=True)
+    ap.add_argument("--grid", required=True)
+    ap.add_argument("--out", required=True)
     args = ap.parse_args()
-
-    cfg = load_yaml(args.config)
-    grid = load_yaml(args.grid)
 
     os.makedirs(args.out, exist_ok=True)
 
-    # download once
-    t0 = time.time()
-    prices = download_prices(cfg)
-    prices.to_csv(os.path.join(args.out, "prices.csv"))
-    print(f"[INFO] Downloaded prices: {prices.shape} in {time.time()-t0:.1f}s")
+    base_cfg = load_yaml(args.config)
+    grid = load_yaml(args.grid)
 
-    # build param sets
-    keys = list(grid.keys())
-    values = [grid[k] if isinstance(grid[k], list) else [grid[k]] for k in keys]
+    t0 = time.time()
+    prices = download_prices_and_build_proxies(base_cfg)
+    prices.to_csv(os.path.join(args.out, "prices.csv"))
+    print(f"[INFO] prices shape={prices.shape} ({time.time()-t0:.1f}s)")
+
+    grid_items = flatten_grid(grid)
+    keys = list(grid_items.keys())
+    values = [grid_items[k] for k in keys]
     combos = list(itertools.product(*values))
     total = len(combos)
+    print(f"[INFO] grid keys={len(keys)} combos={total}")
 
-    results = []
+    rows = []
     best = None
+    best_cagr = -1e18
 
-    start_time = time.time()
-    for idx, combo in enumerate(combos, start=1):
-        run_cfg = json.loads(json.dumps(cfg))  # deep copy via json
+    started = time.time()
+
+    for i, combo in enumerate(combos, start=1):
+        cfg = deep_copy(base_cfg)
         for k, v in zip(keys, combo):
-            deep_set(run_cfg, k, v)
+            deep_set(cfg, k, v)
 
-        iter_start = time.time()
-        curve = run_backtest(prices, run_cfg, save_picks_path=None)
-        iter_cagr = cagr(curve)
-        iter_mdd = mdd(curve)
+        # auto-fill implicit weights (meanrev/trend) from 2 keys if grid only sets 2
+        # bull/bear: meanrev = 1 - (trend + defensive)
+        for bucket in ["bull", "bear"]:
+            tr = float(cfg["allocator"][bucket]["trend"])
+            df = float(cfg["allocator"][bucket]["defensive"])
+            cfg["allocator"][bucket]["meanrev"] = 1.0 - (tr + df)
+        # crash: trend = 1 - (meanrev + defensive)
+        mr = float(cfg["allocator"]["crash"]["meanrev"])
+        df = float(cfg["allocator"]["crash"]["defensive"])
+        cfg["allocator"]["crash"]["trend"] = 1.0 - (mr + df)
 
-        years = (curve.index[-1] - curve.index[0]).days / 365.25
-        final_equity = float(curve.iloc[-1])
+        if not _validate_weights(cfg):
+            continue
 
-        results.append({
-            "param_id": f"{idx:05d}",
-            "CAGR": float(iter_cagr),
-            "MDD": float(iter_mdd),
-            "years": float(years),
-            "final_equity": final_equity,
-            "params": {k: v for k, v in zip(keys, combo)}
+        t1 = time.time()
+        eq, choice_log, picks = run_meta_portfolio(prices, cfg)
+        met = compute_metrics(eq)
+
+        cagr = float(met["cagr"])
+        rows.append({
+            "idx": i,
+            "cagr": cagr,
+            "mdd": float(met["mdd"]),
+            "seed_multiple": float(met["seed_multiple"]),
+            "start": met["start"],
+            "end": met["end"],
+            "years": float(met["years"]),
+            "params": json.dumps({k: v for k, v in zip(keys, combo)}, ensure_ascii=False),
         })
 
-        if best is None or iter_cagr > best["CAGR"]:
-            best = results[-1]
+        if cagr > best_cagr:
+            best_cagr = cagr
+            best = {
+                "params": {k: v for k, v in zip(keys, combo)},
+                "metrics": met,
+                "equity_curve": eq,
+                "engine_choice_log": choice_log,
+                "picks_top2_weekly": picks,
+            }
 
-        # progress + ETA
-        elapsed = time.time() - start_time
-        avg = elapsed / idx
-        remaining = avg * (total - idx)
-        iter_time = time.time() - iter_start
-        print(f"[PROGRESS] {idx}/{total} | iter {iter_time:.2f}s | elapsed {elapsed/60:.1f}m | ETA {remaining/60:.1f}m | best_CAGR {best['CAGR']:.4f}")
+        elapsed = time.time() - started
+        avg = elapsed / i
+        eta = avg * (total - i)
 
-    df = pd.DataFrame(results).sort_values("CAGR", ascending=False)
-    df.to_csv(os.path.join(args.out, "summary.csv"), index=False)
+        print(
+            f"[PROGRESS] {i}/{total} iter={time.time()-t1:.2f}s "
+            f"elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m best_CAGR={best_cagr*100:.2f}%"
+        )
 
-    # save best params
-    with open(os.path.join(args.out, "best_params.json"), "w") as f:
-        json.dump(best, f, indent=2)
+    summary = pd.DataFrame(rows).sort_values("cagr", ascending=False)
+    summary_path = os.path.join(args.out, "summary.csv")
+    summary.to_csv(summary_path, index=False)
 
-    # save picks for best run if requested
-    if args.save_picks and best is not None:
-        best_cfg = json.loads(json.dumps(cfg))
-        for k, v in best["params"].items():
-            deep_set(best_cfg, k, v)
-        picks_path = os.path.join(args.out, "picks_top2_weekly.csv")
-        curve = run_backtest(prices, best_cfg, save_picks_path=picks_path)
-        curve.to_csv(os.path.join(args.out, "equity_curve.csv"))
-        metrics = {
-            "CAGR": float(cagr(curve)),
-            "MDD": float(mdd(curve)),
-            "start": str(curve.index[0].date()),
-            "end": str(curve.index[-1].date()),
-            "years": float((curve.index[-1] - curve.index[0]).days / 365.25),
-            "final_equity": float(curve.iloc[-1]),
-            "best_params": best["params"]
-        }
-        with open(os.path.join(args.out, "metrics.json"), "w") as f:
-            json.dump(metrics, f, indent=2)
+    if best is None:
+        raise RuntimeError("No valid runs (weights validation failed?)")
 
-    print("[DONE] Grid complete. Outputs written to:", args.out)
+    save_json(os.path.join(args.out, "best_params.json"), best["params"])
+    save_json(os.path.join(args.out, "metrics.json"), best["metrics"])
+    best["equity_curve"].to_csv(os.path.join(args.out, "equity_curve.csv"), header=["equity"])
+
+    pd.DataFrame(best["engine_choice_log"]).to_csv(os.path.join(args.out, "engine_choice_log.csv"), index=False)
+
+    if isinstance(best["picks_top2_weekly"], pd.DataFrame) and not best["picks_top2_weekly"].empty:
+        best["picks_top2_weekly"].to_csv(os.path.join(args.out, "picks_top2_weekly.csv"), index=False)
+
+    print(f"[DONE] summary -> {summary_path}")
+    print(f"[DONE] best_CAGR={best_cagr*100:.2f}% out={args.out}")
+
 
 if __name__ == "__main__":
     main()
