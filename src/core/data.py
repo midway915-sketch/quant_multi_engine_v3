@@ -1,23 +1,10 @@
+from __future__ import annotations
 import yfinance as yf
 import pandas as pd
 
 
-def _collect_tickers(cfg):
+def download_prices_and_build_proxies(cfg) -> pd.DataFrame:
     tickers = list(cfg["data"]["tickers"])
-
-    lev = cfg.get("leverage_etf", {})
-    if isinstance(lev, dict):
-        m = lev.get("map", {})
-        if isinstance(m, dict):
-            for _, v in m.items():
-                if v and v not in tickers:
-                    tickers.append(v)
-
-    return tickers
-
-
-def download_prices(cfg) -> pd.DataFrame:
-    tickers = _collect_tickers(cfg)
 
     df = yf.download(
         tickers,
@@ -26,27 +13,47 @@ def download_prices(cfg) -> pd.DataFrame:
         progress=False,
         group_by="column"
     )
-
     if df.empty:
         raise ValueError("Downloaded price data is empty.")
 
     if isinstance(df.columns, pd.MultiIndex):
         if "Adj Close" in df.columns.levels[0]:
-            prices = df["Adj Close"]
+            px = df["Adj Close"]
         elif "Close" in df.columns.levels[0]:
-            prices = df["Close"]
+            px = df["Close"]
         else:
-            prices = df.xs(df.columns.levels[0][0], level=0, axis=1)
+            px = df.xs(df.columns.levels[0][0], level=0, axis=1)
     else:
         if "Adj Close" in df.columns:
-            prices = df[["Adj Close"]]
+            px = df[["Adj Close"]]
         elif "Close" in df.columns:
-            prices = df[["Close"]]
+            px = df[["Close"]]
         else:
-            raise ValueError("Neither Adj Close nor Close found in downloaded data.")
+            raise ValueError("Neither Adj Close nor Close found.")
 
-    prices = prices.dropna(how="all").dropna()
-    if prices.empty:
-        raise ValueError("Price data empty after cleaning.")
+    px = px.dropna(how="all").sort_index().ffill()
 
-    return prices
+    # Build synthetic leveraged proxies for execution
+    # (research mode) daily returns * k -> cumprod
+    rets = px.pct_change().fillna(0.0)
+
+    def make_proxy(base: str, name: str, k: float):
+        if base not in px.columns:
+            return
+        proxy = (1.0 + (rets[base] * k)).cumprod()
+        px[name] = proxy
+
+    make_proxy("QQQ", "TQQQ_PROXY", 3.0)
+    make_proxy("SPY", "UPRO_PROXY", 3.0)
+    make_proxy("SOXX", "SOXL_PROXY", 3.0)
+
+    # 1.5x proxy for mean reversion (SPY 기반)
+    make_proxy("SPY", "SPY_1P5_PROXY", 1.5)
+
+    # Align: require base tickers exist
+    base_cols = [c for c in cfg["data"]["tickers"] if c in px.columns]
+    px = px.dropna(subset=base_cols, how="any")
+    if px.empty:
+        raise ValueError("Price data empty after alignment.")
+
+    return px
