@@ -1,10 +1,26 @@
-
 import yfinance as yf
 import pandas as pd
 
+
+def _collect_tickers(cfg):
+    tickers = list(cfg["data"]["tickers"])
+
+    lev = cfg.get("leverage_etf", {})
+    if isinstance(lev, dict):
+        m = lev.get("map", {})
+        if isinstance(m, dict):
+            for _, v in m.items():
+                if v and v not in tickers:
+                    tickers.append(v)
+
+    return tickers
+
+
 def download_prices(cfg) -> pd.DataFrame:
+    tickers = _collect_tickers(cfg)
+
     df = yf.download(
-        cfg["data"]["tickers"],
+        tickers,
         start=cfg["data"]["start"],
         auto_adjust=False,
         progress=False,
@@ -20,7 +36,6 @@ def download_prices(cfg) -> pd.DataFrame:
         elif "Close" in df.columns.levels[0]:
             prices = df["Close"]
         else:
-            # fallback: take first level
             prices = df.xs(df.columns.levels[0][0], level=0, axis=1)
     else:
         if "Adj Close" in df.columns:
