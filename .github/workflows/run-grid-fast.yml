@@ -21,6 +21,8 @@ jobs:
     runs-on: ubuntu-latest
     env:
       PYTHONUNBUFFERED: "1"
+      # ✅ src/ 를 import 가능하게 만들기 (핵심)
+      PYTHONPATH: ${{ github.workspace }}
 
     steps:
       - name: Checkout
@@ -39,7 +41,8 @@ jobs:
       - name: Run grid (fast)
         run: |
           mkdir -p "${{ inputs.out_dir }}"
-          python scripts/run_grid.py \
+          # ✅ -m 실행: 패키지로 실행하면 import가 더 안정적
+          python -m scripts.run_grid \
             --config "${{ inputs.config_path }}" \
             --grid "${{ inputs.grid_path }}" \
             --out "${{ inputs.out_dir }}"
