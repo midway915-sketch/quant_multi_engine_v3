@@ -1,0 +1,59 @@
+
+name: run-grid
+
+on:
+  workflow_dispatch:
+    inputs:
+      config:
+        description: "Base config file"
+        required: true
+        default: "config/default.yml"
+      grid:
+        description: "Grid config file"
+        required: true
+        default: "config/grid.yml"
+      out_dir:
+        description: "Output directory"
+        required: true
+        default: "out/grid_run"
+
+jobs:
+  grid:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run grid
+        run: |
+          mkdir -p "${{ inputs.out_dir }}"
+          python -m scripts.run_grid             --config "${{ inputs.config }}"             --grid "${{ inputs.grid }}"             --out "${{ inputs.out_dir }}"             --save-picks
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-results
+          if-no-files-found: error
+          path: |
+            ${{ inputs.out_dir }}/summary.csv
+            ${{ inputs.out_dir }}/best_params.json
+            ${{ inputs.out_dir }}/metrics.json
+            ${{ inputs.out_dir }}/equity_curve.csv
+            ${{ inputs.out_dir }}/picks_top2_weekly.csv
+            ${{ inputs.out_dir }}/prices.csv
+            config/default.yml
+            config/grid.yml
