@@ -25,7 +25,7 @@ def run_backtest(prices: pd.DataFrame, cfg, save_picks_path: str | None = None) 
     # Look-ahead safe signals
     scores = momentum_scores(prices, lookback).shift(1)
 
-    # Market proxy for regime (prefer QQQ if exists)
+    # Regime uses market proxy from BASE universe (prefer QQQ)
     mkt = prices["QQQ"] if "QQQ" in prices.columns else prices.iloc[:, 0]
     regime = compute_regime(mkt, cfg).shift(1)
 
@@ -38,8 +38,7 @@ def run_backtest(prices: pd.DataFrame, cfg, save_picks_path: str | None = None) 
     equity = 1.0
     curve = []
 
-    # These are "traded" tickers (may be 3x mapped)
-    current_assets = None
+    current_assets = None     # traded tickers
     current_weights = None
 
     picks_rows = []
@@ -56,8 +55,8 @@ def run_backtest(prices: pd.DataFrame, cfg, save_picks_path: str | None = None) 
                 current_assets = None
                 current_weights = None
             else:
-                # WEAK => risk-off allocation (default stays 1x by config)
                 if cfg.get("risk_off", {}).get("enabled", True) and state == "WEAK":
+                    # risk-off uses base tickers (SHY/GLD), mapping can optionally convert too
                     w = risk_off_weights(cfg["risk_off"]["mode"])
                     base_assets = list(w.keys())
                     traded_assets = [map_to_leveraged(t, cfg, state) for t in base_assets]
@@ -95,7 +94,6 @@ def run_backtest(prices: pd.DataFrame, cfg, save_picks_path: str | None = None) 
                     "traded_top2": t2,
                 })
 
-        # Daily return based on *traded* tickers
         daily_ret = 0.0
         if current_assets:
             for a, w in zip(current_assets, current_weights):
@@ -107,7 +105,6 @@ def run_backtest(prices: pd.DataFrame, cfg, save_picks_path: str | None = None) 
 
     curve_s = pd.Series(curve, index=prices.index)
 
-    # Attach realized return from rebalance date -> next rebalance date
     if save_picks_path is not None and picks_rows:
         picks_df = pd.DataFrame(picks_rows).set_index("date")
         reb_idx = picks_df.index.sort_values()
