@@ -1,0 +1,5 @@
+
+# Use dot-notation keys to override nested config.
+leverage.strong: [3.0, 3.5, 4.0]
+risk_off.mode: ["SHY_100", "SHY_70_GLD_30", "SHY_GLD_50_50", "GLD_100"]
+selection.top_n: [1, 2]
