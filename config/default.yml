@@ -1,38 +1,36 @@
-
 data:
+  # Base universe (unlevered tickers)
   tickers: ["QQQ","SPY","TLT","GLD","SHY"]
   start: "2000-01-01"
 
-walkforward:
-  # not used in v3 minimal grid yet; placeholder
-  train_years: 10
-  test_years: 10
-  step_years: 5
-
 portfolio:
   rebalance: "weekly"   # weekly
-  when: "week_end"      # week_end means W-FRI
-  entry: "next_close"   # apply from next close
+  when: "week_end"      # W-FRI
+  entry: "next_close"   # signals at t used for holdings from t+1 (implemented via shift)
 
 selection:
   top_n: 2
   lookback_days: 126
 
-leverage:
-  enabled: true
-  strong: 3.0
-  weak: 1.0
-  vol_target_enabled: false
-  vol_lookback_days: 20
-  vol_low_threshold: 0.02
-  lev_low_vol: 4.0
-  lev_high_vol: 2.0
-
-risk_off:
-  enabled: true
-  mode: "SHY_70_GLD_30"   # SHY_100, SHY_GLD_50_50, SHY_70_GLD_30, GLD_100
-
 regime:
   enabled: true
   ma_fast: 50
   ma_slow: 200
+
+risk_off:
+  enabled: true
+  # risk-off allocation uses unlevered assets by default (realistic)
+  mode: "SHY_70_GLD_30"   # SHY_100, SHY_GLD_50_50, SHY_70_GLD_30, GLD_100
+
+# NEW: 3x ETF execution mapping (real-world implementable)
+leverage_etf:
+  enabled: true
+  # use 3x only in STRONG regime
+  use_3x_in_strong: true
+  # keep false for realism (risk-off stays 1x by default)
+  use_3x_in_weak: false
+  # base -> 3x ticker mapping (where available)
+  map:
+    QQQ: "TQQQ"
+    SPY: "UPRO"
+    TLT: "TMF"
