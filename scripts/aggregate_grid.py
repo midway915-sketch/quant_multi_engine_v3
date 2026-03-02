@@ -1,74 +1,83 @@
-#!/usr/bin/env python3
 from __future__ import annotations
 
 import argparse
 import json
 import os
-import glob
+from typing import List
+
 import pandas as pd
 
 
 def parse_args():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--inputs", required=True, help="glob for shard outputs, e.g. out/grid_fast_shard_*")
-    ap.add_argument("--out", required=True, help="output dir, e.g. out/grid_fast_merged")
+    ap.add_argument("--shards-root", required=True, help="e.g. out/shards")
+    ap.add_argument("--out", required=True, help="e.g. out/grid_fast_merged")
     return ap.parse_args()
+
+
+def find_summary_files(shards_root: str) -> List[str]:
+    """
+    download-artifact 구조가 어떤 형태든 summary.csv를 전부 긁어모으기.
+    보통:
+      out/shards/grid-fast-results-shard-0/**/summary.csv
+    """
+    hits: List[str] = []
+    for root, _, files in os.walk(shards_root):
+        for f in files:
+            if f == "summary.csv":
+                hits.append(os.path.join(root, f))
+    hits.sort()
+    return hits
 
 
 def main():
     args = parse_args()
     os.makedirs(args.out, exist_ok=True)
 
-    shard_dirs = sorted(glob.glob(args.inputs))
-    if not shard_dirs:
-        raise ValueError(f"No shard dirs matched: {args.inputs}")
+    summary_files = find_summary_files(args.shards_root)
+    if not summary_files:
+        raise ValueError(f"No summary.csv found under shards-root={args.shards_root}")
 
-    summaries = []
-    best_candidates = []
+    dfs = []
+    for path in summary_files:
+        df = pd.read_csv(path)
+        df["source_summary"] = path
+        dfs.append(df)
 
-    for d in shard_dirs:
-        s_path = os.path.join(d, "summary.csv")
-        if os.path.exists(s_path):
-            df = pd.read_csv(s_path)
-            df["shard_dir"] = os.path.basename(d)
-            summaries.append(df)
-
-        bp_path = os.path.join(d, "best_params.json")
-        if os.path.exists(bp_path):
-            with open(bp_path, "r", encoding="utf-8") as f:
-                best_candidates.append(json.load(f))
-
-    if not summaries:
-        raise ValueError("No summary.csv found in shard dirs.")
-
-    merged = pd.concat(summaries, ignore_index=True)
+    merged = pd.concat(dfs, ignore_index=True)
     merged = merged.sort_values("cagr", ascending=False)
 
-    merged_path = os.path.join(args.out, "summary.csv")
-    merged.to_csv(merged_path, index=False)
+    out_summary = os.path.join(args.out, "summary.csv")
+    merged.to_csv(out_summary, index=False)
 
-    # pick global best by max CAGR from merged summary (authoritative)
-    best_row = merged.iloc[0].to_dict()
-    best_overlay = None
+    # global best = top row by cagr (same rule as run_grid)
+    best = merged.iloc[0].to_dict()
 
-    # try to recover overlay from params_json
-    if "params_json" in best_row and isinstance(best_row["params_json"], str) and best_row["params_json"]:
-        best_overlay = json.loads(best_row["params_json"])
+    overlay = None
+    if isinstance(best.get("params_json"), str) and best["params_json"]:
+        try:
+            overlay = json.loads(best["params_json"])
+        except Exception:
+            overlay = None
 
     best_out = {
-        "param_id": best_row.get("param_id"),
-        "cagr": best_row.get("cagr"),
-        "mdd": best_row.get("mdd"),
-        "seed_multiple": best_row.get("seed_multiple"),
-        "overlay": best_overlay,
+        "param_id": best.get("param_id"),
+        "seed_multiple": best.get("seed_multiple"),
+        "cagr": best.get("cagr"),
+        "mdd": best.get("mdd"),
+        "seed_multiple_10y": best.get("seed_multiple_10y"),
+        "cagr_10y": best.get("cagr_10y"),
+        "mdd_10y": best.get("mdd_10y"),
+        "overlay": overlay,
+        "source_summary": best.get("source_summary"),
     }
 
-    best_path = os.path.join(args.out, "best_params.json")
-    with open(best_path, "w", encoding="utf-8") as f:
+    out_best = os.path.join(args.out, "best_params.json")
+    with open(out_best, "w", encoding="utf-8") as f:
         json.dump(best_out, f, indent=2, ensure_ascii=False)
 
-    print(f"[DONE] merged summary -> {merged_path}")
-    print(f"[DONE] merged best_params -> {best_path}")
+    print(f"[DONE] merged summary -> {out_summary}")
+    print(f"[DONE] merged best_params -> {out_best}")
 
 
 if __name__ == "__main__":
