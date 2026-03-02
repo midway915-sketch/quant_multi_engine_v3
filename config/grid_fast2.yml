@@ -17,12 +17,12 @@ risk_off:
   # - SH_100: SPY -1x 인버스
   # - PSQ_100: QQQ -1x 인버스 (너 코드에 없으면 빼)
   risk_off:
-  mode: ["SGOV_100", "SGOV_90_SH_10", "SGOV_80_SH_20", "SGOV_90_PSQ_10", "SGOV_80_PSQ_20"]
+  mode: ["SGOV_100"]
 
 trend_engine:
   mom_lookback_days: [126]
   candidates:
-    - ["QQQ", "SPY"]
+    - ["QQQ", "SPY", "SOXX"]
   top_n: [1]
 
 meanrev_engine:
@@ -32,13 +32,13 @@ meanrev_engine:
   take_profit: [0.06]
   stop_loss: [-0.06]
   candidates:
-    - ["QQQ", "SPY"]
+    - ["QQQ", "SPY", "SOXX"]
   base: ["SPY"]
 
 allocator:
   bull:
-    trend: [0.55, 0.65]
-    meanrev: [0.05]
+    trend: [0.65, 0.70]
+    meanrev: [0.00]
     defensive: [0.40, 0.30]
 
   # ✅ BEAR/CRASH는 100% risk_off로 보내서 “회피”를 강제
