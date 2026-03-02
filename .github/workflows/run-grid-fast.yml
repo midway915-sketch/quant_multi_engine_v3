@@ -1,49 +1,70 @@
-# config/grid_fast.yml  (Crash-only defensive grid)
+name: run-grid-fast
 
-data:
-  prices_start: ["2000-01-01"]
+on:
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: "Base config yml"
+        required: true
+        default: "config/default.yml"
+      grid_path:
+        description: "Grid config yml"
+        required: true
+        default: "config/grid_fast.yml"
+      out_dir:
+        description: "Output directory"
+        required: true
+        default: "out/grid_fast"
 
-state:
-  base_ticker: ["SPY"]
-  ma_days: [200, 250]
-  min_hold_days: [0, 5]
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
 
-crash:
-  lookback_days: [20]
-  threshold: [-0.12, -0.15]
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
 
-risk_off:
-  mode: ["SHY_100", "SHY_70_GLD_30"]
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
 
-trend_engine:
-  mom_lookback_days: [126, 168]
-  candidates:
-    - ["QQQ", "SPY", "SOXX"]
-  top_n: [1, 2]
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
 
-meanrev_engine:
-  lookback_days: [20]
-  drop_threshold: [-0.12, -0.15]
-  hold_days: [5, 10]
-  take_profit: [0.08, 0.10]
-  stop_loss: [-0.08]
-  candidates:
-    - ["QQQ", "SPY", "SOXX"]
-  base: ["QQQ", "SPY"]
+      - name: Run grid (fast)
+        run: |
+          mkdir -p "${{ inputs.out_dir }}"
+          python -m scripts.run_grid \
+            --config "${{ inputs.config_path }}" \
+            --grid "${{ inputs.grid_path }}" \
+            --out "${{ inputs.out_dir }}"
 
-allocator:
-  bull:
-    trend: [0.7, 0.8]
-    meanrev: [0.1]
-    defensive: [0.2, 0.1]
+      # ✅ 실패/성공 상관없이 생성물 위치 확인(디버그)
+      - name: Debug - list outputs
+        if: always()
+        run: |
+          echo "[DEBUG] pwd=$(pwd)"
+          echo "[DEBUG] workspace=${{ github.workspace }}"
+          echo "[DEBUG] out_dir=${{ inputs.out_dir }}"
+          echo "----- ls -la out -----"
+          ls -la out || true
+          echo "----- ls -la out_dir -----"
+          ls -la "${{ inputs.out_dir }}" || true
+          echo "----- find out_dir (maxdepth 2) -----"
+          find "${{ inputs.out_dir }}" -maxdepth 2 -type f -print || true
 
-  bear:
-    trend: [0.35, 0.50]
-    meanrev: [0.15]
-    defensive: [0.50, 0.40]
-
-  # ✅ Crash만 "거의 현금화"
-  crash:
-    trend: [0.00]
-    meanrev: [0.00, 0.10]
-    defensive: [1.00, 0.90]
+      # ✅ 특정 파일 지정 X: out_dir 전체를 아티팩트로 올림
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-fast-results
+          if-no-files-found: warn
+          path: |
+            ${{ inputs.out_dir }}/
