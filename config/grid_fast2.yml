@@ -1,0 +1,46 @@
+data:
+  prices_start: ["2000-01-01"]
+
+state:
+  base_ticker: ["SPY"]
+  ma_days: [200]
+  min_hold_days: [5]
+
+crash:
+  lookback_days: [5, 10]
+  threshold: [-0.08, -0.10]
+
+risk_off:
+  mode: ["SHY_100"]
+
+trend_engine:
+  mom_lookback_days: [126]
+  candidates:
+    - ["QQQ", "SPY"]
+  top_n: [1]
+
+meanrev_engine:
+  lookback_days: [20]
+  drop_threshold: [-0.10]
+  hold_days: [5]
+  take_profit: [0.06]
+  stop_loss: [-0.06]
+  candidates:
+    - ["QQQ", "SPY"]
+  base: ["SPY"]
+
+allocator:
+  bull:
+    trend: [0.45, 0.55]
+    meanrev: [0.05]
+    defensive: [0.50, 0.40]
+
+  bear:
+    trend: [0.00, 0.05]
+    meanrev: [0.00]
+    defensive: [1.00, 0.95]
+
+  crash:
+    trend: [0.00]
+    meanrev: [0.00]
+    defensive: [1.00]
