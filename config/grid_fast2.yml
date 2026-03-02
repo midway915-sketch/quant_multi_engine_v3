@@ -7,8 +7,8 @@ state:
   min_hold_days: [0, 3, 5, 7, 9]
 
 crash:
-  lookback_days: [10, 12, 14, 16]
-  threshold: [-0.10]
+  lookback_days: [10, 12, 14]
+  threshold: [-0.08, -0.10, -0.12]
 
 risk_off:
   mode: ["SGOV_100"]
@@ -32,9 +32,9 @@ meanrev_engine:
 
 allocator:
   bull:
-    trend: [0.70, 0.75]
+    trend: [0.70, 0.75, 0.80, 0.85, 0.90, 0.95, 1.00]
     meanrev: [0.00]
-    defensive: [0.30, 0.25]   # 합이 1.0 되게(0.65/0.70에 맞춰)
+    defensive: [0.30, 0.25, 0.20, 0.15, 0.10, 0.05, 0.00]   # 합이 1.0 되게(0.65/0.70에 맞춰)
   bear:
     trend: [0.00]
     meanrev: [0.00]
