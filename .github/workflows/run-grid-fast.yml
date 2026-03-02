@@ -61,3 +61,5 @@ jobs:
             ${{ inputs.out_dir }}/equity_curve.csv
             ${{ inputs.out_dir }}/engine_choice_log.csv
             ${{ inputs.out_dir }}/picks_top2_weekly.csv
+            ${{ inputs.out_dir }}/holdings_daily.csv
+            ${{ inputs.out_dir }}/holdings_weekly.csv
