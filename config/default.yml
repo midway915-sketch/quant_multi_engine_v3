@@ -43,3 +43,6 @@ allocator:
 costs:
   buy: 0.0007
   sell: 0.0007
+
+debug:
+  state: true
