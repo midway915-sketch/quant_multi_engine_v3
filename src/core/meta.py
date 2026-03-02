@@ -6,14 +6,28 @@ from src.core.state import compute_state_flags
 
 
 def _risk_off_weights(mode: str) -> dict:
+    # Cash-like / short-duration
     if mode == "SHY_100":
         return {"SHY": 1.0}
+    if mode == "BIL_100":
+        return {"BIL_MIX": 1.0}
+    if mode == "SGOV_100":
+        return {"SGOV_MIX": 1.0}
+
+    # Gold mixes
     if mode == "SHY_GLD_50_50":
         return {"SHY": 0.5, "GLD": 0.5}
     if mode == "SHY_70_GLD_30":
         return {"SHY": 0.7, "GLD": 0.3}
     if mode == "GLD_100":
         return {"GLD": 1.0}
+
+    # Inverse equity (MIX = proxy pre-listing, real after listing)
+    if mode == "SH_100":
+        return {"SH_MIX": 1.0}
+    if mode == "PSQ_100":
+        return {"PSQ_MIX": 1.0}
+
     return {"SHY": 1.0}
 
 
