@@ -21,4 +21,13 @@ def risk_off_weights(mode: str):
     if mode == "PSQ_100":
         return {"PSQ_MIX": 1.0}  # -1x QQQ
 
+    if mode == "SGOV_90_SH_10":
+        return {"SGOV_MIX": 0.9, "SH_MIX": 0.1}
+    
+    if mode == "SGOV_80_SH_20":
+        return {"SGOV_MIX": 0.8, "SH_MIX": 0.2}
+    
+    if mode == "SGOV_80_PSQ_20":
+        return {"SGOV_MIX": 0.8, "PSQ_MIX": 0.2}
+    
     return {}
