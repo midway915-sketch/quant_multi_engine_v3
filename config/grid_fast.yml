@@ -1,4 +1,4 @@
-# config/grid_fast.yml  (coarse grid, 512 combos)
+# config/grid_fast.yml  (Crash-only defensive grid)
 
 data:
   prices_start: ["2000-01-01"]
@@ -29,20 +29,21 @@ meanrev_engine:
   stop_loss: [-0.08]
   candidates:
     - ["QQQ", "SPY", "SOXX"]
-  base: ["SPY"]
+  base: ["SPY", "QQQ"]
 
 allocator:
   bull:
-    trend: [0.75]
-    meanrev: [0.10]
-    defensive: [0.15]
+    trend: [0.7, 0.8]
+    meanrev: [0.1]
+    defensive: [0.2, 0.1]
 
   bear:
-    trend: [0.45]
+    trend: [0.35, 0.50]
     meanrev: [0.15]
-    defensive: [0.40]
+    defensive: [0.50, 0.40]
 
+  # ✅ Crash만 "거의 현금화"
   crash:
-    trend: [0.05]
-    meanrev: [0.45]
-    defensive: [0.50]
+    trend: [0.00]
+    meanrev: [0.00, 0.10]
+    defensive: [1.00, 0.90]
