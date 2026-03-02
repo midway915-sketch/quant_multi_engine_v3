@@ -3,15 +3,15 @@ data:
 
 state:
   base_ticker: ["SPY"]
-  ma_days: [150, 160, 170, 180, 190, 200]
-  min_hold_days: [0, 3, 5, 7, 9]
+  ma_days: [140, 150, 160, 170, 180]
+  min_hold_days: [7, 9, 11]
 
 crash:
-  lookback_days: [10, 12, 14]
-  threshold: [-0.08, -0.10, -0.12]
+  lookback_days: [12]
+  threshold: [-0.10]
 
 risk_off:
-  mode: ["SGOV_100"]
+  mode: ["SHY_100"]
 
 trend_engine:
   mom_lookback_days: [126]
@@ -20,7 +20,6 @@ trend_engine:
   top_n: [1]
 
 meanrev_engine:
-  # meanrev 비중을 0으로 두더라도, 엔진 자체는 돌아갈 수 있으니 최소값으로 고정
   lookback_days: [20]
   drop_threshold: [-0.10]
   hold_days: [5]
@@ -32,13 +31,15 @@ meanrev_engine:
 
 allocator:
   bull:
-    trend: [0.70, 0.75, 0.80, 0.90, 1.00]
+    trend: [0.70, 0.75]
     meanrev: [0.00]
-    defensive: [0.30, 0.25, 0.20, 0.10, 0.00]   # 합이 1.0 되게(0.65/0.70에 맞춰)
+    defensive: [0.25, 0.30]
+
   bear:
     trend: [0.00]
     meanrev: [0.00]
     defensive: [1.00]
+
   crash:
     trend: [0.00]
     meanrev: [0.00]
