@@ -7,7 +7,7 @@ import math
 import os
 import time
 from itertools import product
-from typing import Any, List, Tuple
+from typing import Any, Dict, List, Tuple
 
 import pandas as pd
 import yaml
@@ -18,10 +18,6 @@ from src.core.metrics import compute_metrics
 
 
 def deep_set(d: dict, key_path: str, value: Any) -> None:
-    """
-    Set nested dict key via dot-path, creating dicts if needed.
-    Example: deep_set(cfg, "allocator.bull.trend", 0.8)
-    """
     parts = key_path.split(".")
     cur = d
     for p in parts[:-1]:
@@ -32,7 +28,6 @@ def deep_set(d: dict, key_path: str, value: Any) -> None:
 
 
 def deep_merge(base: dict, overlay: dict) -> dict:
-    """Recursively merge overlay onto base (non-mutating)."""
     out = dict(base)
     for k, v in overlay.items():
         if k in out and isinstance(out[k], dict) and isinstance(v, dict):
@@ -43,10 +38,6 @@ def deep_merge(base: dict, overlay: dict) -> dict:
 
 
 def make_param_sets(grid: dict) -> List[dict]:
-    """
-    grid yaml is a nested dict where leaves are lists (scan values).
-    Create list of param dicts (nested) corresponding to cartesian product.
-    """
     flat: List[Tuple[str, List[Any]]] = []
 
     def walk(node: Any, prefix: str = ""):
@@ -84,6 +75,24 @@ def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
 
 
+def flatten_dict(d: Any, prefix: str = "") -> Dict[str, Any]:
+    """
+    Flatten nested dict into dot paths.
+    Example: {"a":{"b":1}} -> {"a.b":1}
+    Lists are JSON-stringified to keep summary.csv rectangular.
+    """
+    out: Dict[str, Any] = {}
+    if isinstance(d, dict):
+        for k, v in d.items():
+            p = f"{prefix}.{k}" if prefix else str(k)
+            out.update(flatten_dict(v, p))
+    elif isinstance(d, list):
+        out[prefix] = json.dumps(d, separators=(",", ":"), ensure_ascii=False)
+    else:
+        out[prefix] = d
+    return out
+
+
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="config/default.yml")
@@ -97,7 +106,6 @@ def main():
     out_dir = args.out
     ensure_dir(out_dir)
 
-    # --- load yaml ---
     with open(args.config, "r", encoding="utf-8") as f:
         base_cfg = yaml.safe_load(f)
     with open(args.grid, "r", encoding="utf-8") as f:
@@ -106,21 +114,20 @@ def main():
     param_sets = make_param_sets(grid_cfg)
     n = len(param_sets)
     if n <= 0:
-        raise ValueError("Grid produced 0 param sets. Check grid.yml format (leaves should be lists/scalars).")
+        raise ValueError("Grid produced 0 param sets. Check grid.yml format.")
 
-    # --- download prices + build proxies (once) ---
+    # download prices once
     prices = download_prices_and_build_proxies(base_cfg)
-    prices_path = os.path.join(out_dir, "prices.csv")
-    prices.to_csv(prices_path, index=True)
+    prices.to_csv(os.path.join(out_dir, "prices.csv"), index=True)
 
-    # --- iterate grid ---
-    best_cagr = None
+    best = None
     best_row = None
     best_params = None
-    rows = []
+    rows: List[dict] = []
 
     t0 = time.time()
-    progress_every = max(1, n // 20)  # ~5% 단위
+    progress_every = max(1, n // 20)
+
     for i, overlay in enumerate(param_sets, 1):
         cfg = deep_merge(base_cfg, overlay)
 
@@ -133,7 +140,7 @@ def main():
                         if isinstance(v, list):
                             raise ValueError(
                                 f"Allocator value is list after merge: allocator.{bucket}.{k}={v}. "
-                                f"Grid expansion failed; ensure scan values are only in grid.yml and expanded by run_grid."
+                                f"Grid expansion failed."
                             )
 
         eq, choice_log, picks, holdings_daily, holdings_weekly = run_meta_portfolio(prices, cfg)
@@ -150,6 +157,7 @@ def main():
 
         pid = short_param_id(overlay)
 
+        # ---- summary row ----
         row = {
             "param_id": pid,
             "seed_multiple": float(met["seed_multiple"]),
@@ -159,21 +167,27 @@ def main():
             "cagr_10y": float(met_10y["cagr"]),
             "mdd_10y": float(met_10y["mdd"]),
         }
-        # friendly percent columns
         row["cagr_pct"] = row["cagr"] * 100.0
         row["mdd_pct"] = row["mdd"] * 100.0
         row["cagr_10y_pct"] = row["cagr_10y"] * 100.0
         row["mdd_10y_pct"] = row["mdd_10y"] * 100.0
 
+        # ✅ include params in summary.csv
+        row["params_json"] = json.dumps(overlay, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+        flat_params = flatten_dict(overlay)
+        # prefix to avoid name collisions
+        for k, v in flat_params.items():
+            row[f"params__{k}"] = v
+
         rows.append(row)
 
         # best by CAGR
-        if (best_cagr is None) or (row["cagr"] > best_cagr):
-            best_cagr = row["cagr"]
+        if (best is None) or (row["cagr"] > best):
+            best = row["cagr"]
             best_row = row
             best_params = overlay
 
-            # write best-run artifacts continuously
             eq.to_csv(os.path.join(out_dir, "equity_curve.csv"), index=True)
             pd.DataFrame(choice_log).to_csv(os.path.join(out_dir, "engine_choice_log.csv"), index=False)
             picks.to_csv(os.path.join(out_dir, "picks_top2_weekly.csv"), index=False)
@@ -184,28 +198,27 @@ def main():
 
         # progress + ETA (keep)
         elapsed = time.time() - t0
-        per_iter = elapsed / i
-        eta = per_iter * (n - i)
+        per = elapsed / i
+        eta = per * (n - i)
         if i == 1 or i % progress_every == 0 or i == n:
             print(
-                f"[PROGRESS] {i}/{n} iter={per_iter:.2f}s elapsed={elapsed/60:.1f}m "
-                f"eta={eta/60:.1f}m best_CAGR={(best_cagr*100):.2f}%"
+                f"[PROGRESS] {i}/{n} iter={per:.2f}s elapsed={elapsed/60:.1f}m "
+                f"eta={eta/60:.1f}m best_CAGR={(best*100):.2f}%"
             )
 
-    # --- write summary + best_params ---
     summary = pd.DataFrame(rows).sort_values("cagr", ascending=False)
     summary_path = os.path.join(out_dir, "summary.csv")
     summary.to_csv(summary_path, index=False)
     print(f"[DONE] summary -> {summary_path}")
 
     if best_row is None or best_params is None:
-        raise RuntimeError("No best result selected; unexpected state. Check run_meta_portfolio/compute_metrics outputs.")
+        raise RuntimeError("No best result selected; unexpected state.")
 
     best_params_path = os.path.join(out_dir, "best_params.json")
     with open(best_params_path, "w", encoding="utf-8") as f:
         json.dump({"param_id": best_row["param_id"], "overlay": best_params}, f, indent=2)
     print(f"[DONE] best_params -> {best_params_path}")
-    print(f"[DONE] best_CAGR={(best_cagr*100):.2f}% out={out_dir}")
+    print(f"[DONE] best_CAGR={(best*100):.2f}% out={out_dir}")
 
 
 if __name__ == "__main__":
