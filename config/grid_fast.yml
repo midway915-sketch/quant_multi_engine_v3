@@ -1,5 +1,3 @@
-# config/grid_fast.yml  (Crash-only defensive grid)
-
 data:
   prices_start: ["2000-01-01"]
 
@@ -19,13 +17,13 @@ trend_engine:
   mom_lookback_days: [126, 168]
   candidates:
     - ["QQQ", "SPY", "SOXX"]
-  top_n: [1, 2]
+  top_n: [1]   # ✅ 고정 (2 -> 1)
 
 meanrev_engine:
   lookback_days: [20]
   drop_threshold: [-0.12, -0.15]
   hold_days: [5, 10]
-  take_profit: [0.08, 0.10]
+  take_profit: [0.08]  # ✅ 고정 (2 -> 1)
   stop_loss: [-0.08]
   candidates:
     - ["QQQ", "SPY", "SOXX"]
@@ -42,7 +40,6 @@ allocator:
     meanrev: [0.15]
     defensive: [0.50, 0.40]
 
-  # ✅ Crash만 "거의 현금화"
   crash:
     trend: [0.00]
     meanrev: [0.00, 0.10]
