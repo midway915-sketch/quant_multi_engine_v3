@@ -11,42 +11,34 @@ crash:
   threshold: [-0.08, -0.10]
 
 risk_off:
-  # ✅ 여기서 방어자산/인버스를 갈아끼우는 실험
-  # - SHY_100: 기존 단기채
-  # - SGOV_100: 초단기 T-bill (없으면 BIL_100으로 바꿔)
-  # - SH_100: SPY -1x 인버스
-  # - PSQ_100: QQQ -1x 인버스 (너 코드에 없으면 빼)
-  risk_off:
   mode: ["SGOV_100"]
 
 trend_engine:
   mom_lookback_days: [126]
   candidates:
-    - ["QQQ", "SPY"]
+    - ["QQQ", "SPY", "SOXX"]
   top_n: [1]
 
 meanrev_engine:
+  # meanrev 비중을 0으로 두더라도, 엔진 자체는 돌아갈 수 있으니 최소값으로 고정
   lookback_days: [20]
   drop_threshold: [-0.10]
   hold_days: [5]
   take_profit: [0.06]
   stop_loss: [-0.06]
   candidates:
-    - ["QQQ", "SPY"]
+    - ["QQQ", "SPY", "SOXX"]
   base: ["SPY"]
 
 allocator:
   bull:
     trend: [0.65, 0.70]
     meanrev: [0.00]
-    defensive: [0.40, 0.30]
-
-  # ✅ BEAR/CRASH는 100% risk_off로 보내서 “회피”를 강제
+    defensive: [0.35, 0.30]   # 합이 1.0 되게(0.65/0.70에 맞춰)
   bear:
     trend: [0.00]
     meanrev: [0.00]
     defensive: [1.00]
-
   crash:
     trend: [0.00]
     meanrev: [0.00]
