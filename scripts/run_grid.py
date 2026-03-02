@@ -76,11 +76,6 @@ def ensure_dir(path: str) -> None:
 
 
 def flatten_dict(d: Any, prefix: str = "") -> Dict[str, Any]:
-    """
-    Flatten nested dict into dot paths.
-    Example: {"a":{"b":1}} -> {"a.b":1}
-    Lists are JSON-stringified to keep summary.csv rectangular.
-    """
     out: Dict[str, Any] = {}
     if isinstance(d, dict):
         for k, v in d.items():
@@ -98,11 +93,20 @@ def parse_args():
     ap.add_argument("--config", required=True, help="config/default.yml")
     ap.add_argument("--grid", required=True, help="config/grid_fast.yml")
     ap.add_argument("--out", required=True, help="out/grid_fast")
+
+    # ✅ shard options
+    ap.add_argument("--shard-index", type=int, default=0, help="0-based shard index")
+    ap.add_argument("--shard-count", type=int, default=1, help="number of shards (>=1)")
     return ap.parse_args()
 
 
 def main():
     args = parse_args()
+    if args.shard_count < 1:
+        raise ValueError("--shard-count must be >= 1")
+    if not (0 <= args.shard_index < args.shard_count):
+        raise ValueError("--shard-index must be in [0, shard-count)")
+
     out_dir = args.out
     ensure_dir(out_dir)
 
@@ -111,12 +115,24 @@ def main():
     with open(args.grid, "r", encoding="utf-8") as f:
         grid_cfg = yaml.safe_load(f)
 
-    param_sets = make_param_sets(grid_cfg)
-    n = len(param_sets)
-    if n <= 0:
+    all_param_sets = make_param_sets(grid_cfg)
+    n_all = len(all_param_sets)
+    if n_all <= 0:
         raise ValueError("Grid produced 0 param sets. Check grid.yml format.")
 
-    # download prices once
+    # ✅ shard slicing by index modulo (stable, simple)
+    param_sets = [p for j, p in enumerate(all_param_sets) if (j % args.shard_count) == args.shard_index]
+    n = len(param_sets)
+
+    # write shard info
+    with open(os.path.join(out_dir, "shard_info.json"), "w", encoding="utf-8") as f:
+        json.dump(
+            {"shard_index": args.shard_index, "shard_count": args.shard_count, "total": n_all, "this_shard": n},
+            f,
+            indent=2,
+        )
+
+    # download prices once per shard
     prices = download_prices_and_build_proxies(base_cfg)
     prices.to_csv(os.path.join(out_dir, "prices.csv"), index=True)
 
@@ -126,12 +142,12 @@ def main():
     rows: List[dict] = []
 
     t0 = time.time()
-    progress_every = max(1, n // 20)
+    progress_every = max(1, n // 20) if n > 0 else 1
 
     for i, overlay in enumerate(param_sets, 1):
         cfg = deep_merge(base_cfg, overlay)
 
-        # safety guard: allocator 값이 list로 남아있으면 grid 확장 실패
+        # safety guard
         if "allocator" in cfg:
             for bucket in ("bull", "bear", "crash"):
                 if bucket in cfg["allocator"]:
@@ -139,14 +155,12 @@ def main():
                         v = cfg["allocator"][bucket].get(k)
                         if isinstance(v, list):
                             raise ValueError(
-                                f"Allocator value is list after merge: allocator.{bucket}.{k}={v}. "
-                                f"Grid expansion failed."
+                                f"Allocator value is list after merge: allocator.{bucket}.{k}={v}. Grid expansion failed."
                             )
 
         eq, choice_log, picks, holdings_daily, holdings_weekly = run_meta_portfolio(prices, cfg)
         met = compute_metrics(eq)
 
-        # recent 10y metrics
         end = eq.index.max()
         start_10y = end - pd.DateOffset(years=10)
         eq_10y = eq.loc[eq.index >= start_10y]
@@ -157,7 +171,6 @@ def main():
 
         pid = short_param_id(overlay)
 
-        # ---- summary row ----
         row = {
             "param_id": pid,
             "seed_multiple": float(met["seed_multiple"]),
@@ -172,17 +185,14 @@ def main():
         row["cagr_10y_pct"] = row["cagr_10y"] * 100.0
         row["mdd_10y_pct"] = row["mdd_10y"] * 100.0
 
-        # ✅ include params in summary.csv
+        # include params
         row["params_json"] = json.dumps(overlay, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-
         flat_params = flatten_dict(overlay)
-        # prefix to avoid name collisions
         for k, v in flat_params.items():
             row[f"params__{k}"] = v
 
         rows.append(row)
 
-        # best by CAGR
         if (best is None) or (row["cagr"] > best):
             best = row["cagr"]
             best_row = row
@@ -196,29 +206,25 @@ def main():
             with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
                 json.dump({"all": met, "recent_10y": met_10y}, f, indent=2)
 
-        # progress + ETA (keep)
         elapsed = time.time() - t0
         per = elapsed / i
         eta = per * (n - i)
         if i == 1 or i % progress_every == 0 or i == n:
             print(
-                f"[PROGRESS] {i}/{n} iter={per:.2f}s elapsed={elapsed/60:.1f}m "
-                f"eta={eta/60:.1f}m best_CAGR={(best*100):.2f}%"
+                f"[PROGRESS] shard={args.shard_index}/{args.shard_count} {i}/{n} "
+                f"iter={per:.2f}s elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m best_CAGR={(best*100):.2f}%"
             )
 
     summary = pd.DataFrame(rows).sort_values("cagr", ascending=False)
     summary_path = os.path.join(out_dir, "summary.csv")
     summary.to_csv(summary_path, index=False)
-    print(f"[DONE] summary -> {summary_path}")
+    print(f"[DONE] shard {args.shard_index}: summary -> {summary_path}")
 
-    if best_row is None or best_params is None:
-        raise RuntimeError("No best result selected; unexpected state.")
-
-    best_params_path = os.path.join(out_dir, "best_params.json")
-    with open(best_params_path, "w", encoding="utf-8") as f:
-        json.dump({"param_id": best_row["param_id"], "overlay": best_params}, f, indent=2)
-    print(f"[DONE] best_params -> {best_params_path}")
-    print(f"[DONE] best_CAGR={(best*100):.2f}% out={out_dir}")
+    if best_row is not None and best_params is not None:
+        best_params_path = os.path.join(out_dir, "best_params.json")
+        with open(best_params_path, "w", encoding="utf-8") as f:
+            json.dump({"param_id": best_row["param_id"], "overlay": best_params}, f, indent=2)
+        print(f"[DONE] shard {args.shard_index}: best_params -> {best_params_path}")
 
 
 if __name__ == "__main__":
