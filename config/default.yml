@@ -45,4 +45,4 @@ costs:
   sell: 0.0007
 
 debug:
-  state: true
+  state: false
