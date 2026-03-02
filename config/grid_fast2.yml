@@ -3,12 +3,12 @@ data:
 
 state:
   base_ticker: ["SPY"]
-  ma_days: [200]
-  min_hold_days: [5]
+  ma_days: [150, 180, 200]
+  min_hold_days: [0, 3, 5]
 
 crash:
-  lookback_days: [5, 10]
-  threshold: [-0.08, -0.10]
+  lookback_days: [10, 12]
+  threshold: [-0.10, -0.12]
 
 risk_off:
   mode: ["SGOV_100"]
