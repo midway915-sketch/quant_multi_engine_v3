@@ -145,6 +145,7 @@ def main():
         )
 
     # prices: load from csv if provided, else download
+        # ✅ prices: load from csv if provided, else download
     if args.prices_csv:
         if not os.path.exists(args.prices_csv):
             raise FileNotFoundError(f"--prices-csv not found: {args.prices_csv}")
@@ -152,8 +153,16 @@ def main():
     else:
         prices = download_prices_and_build_proxies(base_cfg)
 
-    prices.to_csv(os.path.join(out_dir, "prices.csv"), index=True)
+    # ✅ enforce date range (optional): data.start / data.end
+    start = (base_cfg.get("data", {}) or {}).get("start")
+    end = (base_cfg.get("data", {}) or {}).get("end")
+    if start:
+        prices = prices.loc[prices.index >= pd.Timestamp(start)]
+    if end:
+        prices = prices.loc[prices.index <= pd.Timestamp(end)]
 
+    # always persist prices used by this shard (debug/repro)
+    prices.to_csv(os.path.join(out_dir, "prices.csv"), index=True)
     best = None
     best_row = None
     best_params = None
