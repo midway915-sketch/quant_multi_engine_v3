@@ -3,15 +3,15 @@ data:
 
 state:
   base_ticker: ["SPY"]
-  ma_days: [140, 150, 160, 170, 180]
-  min_hold_days: [7, 9, 11]
+  ma_days: [150]
+  min_hold_days: [9]
 
 crash:
   lookback_days: [12]
   threshold: [-0.10]
 
 risk_off:
-  mode: ["SHY_100", "SGOV_100"]
+  mode: ["SGOV_100"]
 
 trend_engine:
   mom_lookback_days: [126]
@@ -31,9 +31,9 @@ meanrev_engine:
 
 allocator:
   bull:
-    trend: [0.70, 0.75]
+    trend: [0.75]
     meanrev: [0.00]
-    defensive: [0.25, 0.30]
+    defensive: [0.25]
 
   bear:
     trend: [0.00]
