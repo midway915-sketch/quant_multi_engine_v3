@@ -18,6 +18,7 @@ def _risk_off_weights(mode: str) -> dict:
 
 
 def _trend_universe_to_trade_col(ticker: str) -> str:
+    # Trend는 3x MIX
     if ticker == "QQQ":
         return "TQQQ_MIX"
     if ticker == "SPY":
@@ -28,7 +29,7 @@ def _trend_universe_to_trade_col(ticker: str) -> str:
 
 
 def _meanrev_universe_to_trade_col(ticker: str) -> str:
-    # MeanRev는 2배 ETF(MIX)
+    # MeanRev는 2x MIX
     if ticker == "QQQ":
         return "QLD_MIX"
     if ticker == "SPY":
@@ -46,19 +47,43 @@ def _weekly_close(prices: pd.DataFrame) -> pd.DataFrame:
     return prices.resample("W-FRI").last()
 
 
+def _normalize_weights(h: dict) -> dict:
+    s = float(sum(h.values()))
+    if s <= 0:
+        return {}
+    return {k: float(v / s) for k, v in h.items()}
+
+
 def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
+    """
+    Lookahead-free:
+      - Today's return uses yesterday's confirmed holdings
+      - Signals/picks computed at date dt are applied starting next trading day
+
+    Returns:
+      equity: pd.Series
+      engine_choice_log: list[dict]
+      picks_top2_weekly: pd.DataFrame
+      holdings_daily: pd.DataFrame  (date,ticker,weight,state)
+      holdings_weekly: pd.DataFrame (week_end,ticker,avg_weight,week_ret,contrib)
+    """
     prices = prices.copy()
     returns = prices.pct_change().fillna(0.0)
 
     state_df = compute_state_flags(prices, cfg)
 
+    # ---- Trend config (safe fallback) ----
     trend_cfg = cfg.get("trend_engine", {}) or {}
     mom_lb = int(trend_cfg.get("mom_lookback_days", 168))
     candidates = trend_cfg.get("candidates", ["QQQ", "SPY", "SOXX"])
+
     sel_cfg = cfg.get("selection", {}) or {}
     top_n = int(sel_cfg.get("top_n", trend_cfg.get("top_n", 1)))
 
-    mom = prices.pct_change(mom_lb)  # ❗ fillna(0) 안 함 (초기 구간 0점 동점 방지)
+    # Momentum (do NOT fillna with 0 to avoid early tie noise)
+    mom = prices.pct_change(mom_lb)
+
+    # ---- MeanRev config ----
     mr_cfg = cfg.get("meanrev_engine", {}) or {}
     mr_lb = int(mr_cfg.get("lookback_days", 20))
     mr_drop = float(mr_cfg.get("drop_threshold", -0.12))
@@ -70,25 +95,15 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     if mr_base not in mr_candidates:
         mr_base = "QQQ"
 
+    # ---- Allocator / defensive ----
     alloc = cfg["allocator"]
     risk_off_mode = (cfg.get("risk_off", {}) or {}).get("mode", "SHY_100")
 
+    # Weekly rebalance dates (Fridays present in price index)
     week_end = _week_end_index(prices.index)
     reb_dates = prices.index[prices.index.isin(week_end.unique())]
 
-    current_trend_tradecols = []
-    picks_rows = []
-
-    mr_active = False
-    mr_entry_price = None
-    mr_days = 0
-    mr_trade_col = None
-
-    equity = 1.0
-    curve = []
-    engine_choice_log = []
-    holdings_daily_rows = []
-
+    # Weekly closes for weekly return reporting
     wclose = _weekly_close(prices)
 
     def get_week_ret(ticker_col: str, wk_end: pd.Timestamp) -> float:
@@ -103,19 +118,55 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             return np.nan
         return float(cur / prev - 1.0)
 
-    for dt in prices.index:
+    # --- State for Trend picks ---
+    current_trend_tradecols = []
+    picks_rows = []
+
+    # --- MeanRev position state (decision made at dt, applied dt+1) ---
+    mr_active = False
+    mr_entry_price = None
+    mr_days = 0
+    mr_trade_col = None
+
+    # --- Holdings (lookahead-free): h_cur applies today, h_next applies tomorrow ---
+    h_cur = {"SHY": 1.0}   # start parked in SHY
+    h_next = h_cur.copy()
+
+    equity = 1.0
+    curve = []
+    engine_choice_log = []
+    holdings_daily_rows = []
+
+    idx = prices.index
+
+    for i, dt in enumerate(idx):
         st = state_df.loc[dt, "state"]
 
-        # --- weekly trend pick (Friday) ---
+        # 1) ---- APPLY TODAY'S RETURN USING h_cur (yesterday-confirmed) ----
+        # log today's holdings
+        for t, w in h_cur.items():
+            holdings_daily_rows.append({
+                "date": str(dt.date()),
+                "ticker": t,
+                "weight": float(w),
+                "state": st
+            })
+
+        daily_ret = 0.0
+        for t, w in h_cur.items():
+            if t in returns.columns:
+                daily_ret += float(returns.loc[dt, t]) * float(w)
+
+        equity *= (1.0 + daily_ret)
+        curve.append(equity)
+
+        # 2) ---- COMPUTE SIGNALS / DESIRED HOLDINGS FOR TOMORROW (h_next) ----
+        # (a) Trend weekly picks decided on rebalance dates (Fridays)
         if dt in reb_dates:
             m = mom.loc[dt, candidates]
             ranked = m.dropna().sort_values(ascending=False)
-
-            # 초기 구간(lookback 부족)엔 ranked가 비어있을 수 있음
             if ranked.empty:
-                top = []
-                top1 = None
-                top2 = None
+                top1, top2 = None, None
                 current_trend_tradecols = []
             else:
                 top = list(ranked.index[:top_n])
@@ -137,7 +188,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             row["rank2_week_ret"] = get_week_ret(row["rank2_trade"], wk) if row["rank2_trade"] else np.nan
             picks_rows.append(row)
 
-        # --- MeanRev (2x MIX) ---
+        # (b) MeanRev entry/exit decisions at dt (already uses shift(1) for signal)
         mr_price_under = prices[mr_base] if mr_base in prices.columns else None
         if mr_price_under is None or mr_price_under.isna().all():
             mr_active = False
@@ -146,6 +197,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             mr_days = 0
         else:
             r_lb = mr_price_under.pct_change(mr_lb).shift(1).loc[dt]
+
             if (not mr_active) and pd.notna(r_lb) and (float(r_lb) <= mr_drop):
                 mr_active = True
                 mr_trade_col = _meanrev_universe_to_trade_col(mr_base)
@@ -168,52 +220,44 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                         mr_entry_price = None
                         mr_days = 0
 
-        # --- weights by state ---
+        # (c) Build desired holdings for TOMORROW based on today's state + decisions
         st_key = st.lower()
         w_tr = float(alloc[st_key]["trend"])
         w_mr = float(alloc[st_key]["meanrev"])
         w_df = float(alloc[st_key]["defensive"])
         df_w = _risk_off_weights(risk_off_mode)
 
-        h = {}
+        h_des = {}
 
+        # Trend slice (equal weight)
         if w_tr > 0 and len(current_trend_tradecols) > 0:
             per = w_tr / len(current_trend_tradecols)
             for tcol in current_trend_tradecols:
-                h[tcol] = h.get(tcol, 0.0) + per
+                h_des[tcol] = h_des.get(tcol, 0.0) + per
 
+        # MeanRev slice (inactive -> SHY)
         if w_mr > 0:
             if mr_active and (mr_trade_col in returns.columns):
-                h[mr_trade_col] = h.get(mr_trade_col, 0.0) + w_mr
+                h_des[mr_trade_col] = h_des.get(mr_trade_col, 0.0) + w_mr
             else:
-                h["SHY"] = h.get("SHY", 0.0) + w_mr
+                h_des["SHY"] = h_des.get("SHY", 0.0) + w_mr
 
+        # Defensive slice
         if w_df > 0:
             for t, w in df_w.items():
-                h[t] = h.get(t, 0.0) + (w_df * float(w))
+                h_des[t] = h_des.get(t, 0.0) + (w_df * float(w))
 
-        s = sum(h.values())
-        if s > 0:
-            for k in list(h.keys()):
-                h[k] = float(h[k] / s)
+        h_des = _normalize_weights(h_des)
+        if not h_des:
+            h_des = {"SHY": 1.0}
 
-        # daily holdings log
-        for t, w in h.items():
-            holdings_daily_rows.append({
-                "date": str(dt.date()),
-                "ticker": t,
-                "weight": w,
-                "state": st
-            })
+        # 3) ---- COMMIT TOMORROW HOLDINGS (lookahead-free) ----
+        # only if there *is* a next trading day
+        if i < len(idx) - 1:
+            h_next = h_des
+            h_cur = h_next
 
-        daily_ret = 0.0
-        for t, w in h.items():
-            if t in returns.columns:
-                daily_ret += float(returns.loc[dt, t]) * float(w)
-
-        equity *= (1.0 + daily_ret)
-        curve.append(equity)
-
+        # log engine choice for dt (decision date)
         engine_choice_log.append({
             "date": str(dt.date()),
             "state": st,
@@ -222,41 +266,32 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             "w_defensive": w_df,
             "meanrev_active": bool(mr_active),
             "meanrev_ticker": mr_trade_col if mr_active else "",
+            "rebalance_today": bool(dt in reb_dates),
         })
 
     equity_series = pd.Series(curve, index=prices.index, name="equity")
     picks_df = pd.DataFrame(picks_rows)
     holdings_daily = pd.DataFrame(holdings_daily_rows)
 
-    # ✅ FIX: holdings_weekly는 "없는 날=0" 포함해서 주간 평균
+    # holdings_weekly (없는 날=0 포함 평균)
     if not holdings_daily.empty:
         hd = holdings_daily.copy()
         hd["date"] = pd.to_datetime(hd["date"])
-        hd["week_end"] = _week_end_index(pd.DatetimeIndex(hd["date"])).values
-
-        # date x ticker 매트릭스로 만들고, 없는 ticker는 0
         mat = (
             hd.pivot_table(index="date", columns="ticker", values="weight", aggfunc="sum")
             .fillna(0.0)
         )
-        # 각 date의 weight 합이 1인지(숫자 오차 제외) 유지
-        # mat.sum(axis=1) ~= 1
-
         mat["week_end"] = _week_end_index(mat.index)
-        wk_mean = mat.groupby("week_end").mean()  # ✅ 모든 날짜 포함 평균
-
-        wk_mean = wk_mean.drop(columns=["week_end"], errors="ignore")
+        wk_mean = mat.groupby("week_end").mean().drop(columns=["week_end"], errors="ignore")
         wk_avg = wk_mean.reset_index().melt(id_vars=["week_end"], var_name="ticker", value_name="avg_weight")
-        wk_avg = wk_avg[wk_avg["avg_weight"] > 0]  # 0은 제거(파일 용량 줄이기)
+        wk_avg = wk_avg[wk_avg["avg_weight"] > 0]
     else:
         wk_avg = pd.DataFrame(columns=["week_end", "ticker", "avg_weight"])
 
-    wclose = _weekly_close(prices)
-
-    def wk_ret_col(ticker: str, wk_end: pd.Timestamp) -> float:
-        if ticker not in wclose.columns or wk_end not in wclose.index:
+    def wk_ret_col(ticker: str, wk_end_ts: pd.Timestamp) -> float:
+        if ticker not in wclose.columns or wk_end_ts not in wclose.index:
             return np.nan
-        loc = wclose.index.get_loc(wk_end)
+        loc = wclose.index.get_loc(wk_end_ts)
         if loc == 0:
             return np.nan
         prev = wclose.iloc[loc - 1][ticker]
