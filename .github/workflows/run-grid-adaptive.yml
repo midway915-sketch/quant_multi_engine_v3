@@ -136,7 +136,7 @@ jobs:
             ${{ inputs.out_dir }}/shard_${{ matrix.shard_index }}/
 
   # 3) Merge summaries (best-effort) into one CSV for convenience
-    merge:
+  merge:
     needs: run_shards
     runs-on: ubuntu-latest
 
