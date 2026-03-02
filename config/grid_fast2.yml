@@ -11,7 +11,12 @@ crash:
   threshold: [-0.08, -0.10]
 
 risk_off:
-  mode: ["SHY_100"]
+  # ✅ 여기서 방어자산/인버스를 갈아끼우는 실험
+  # - SHY_100: 기존 단기채
+  # - SGOV_100: 초단기 T-bill (없으면 BIL_100으로 바꿔)
+  # - SH_100: SPY -1x 인버스
+  # - PSQ_100: QQQ -1x 인버스 (너 코드에 없으면 빼)
+  mode: ["SHY_100", "SGOV_100", "SH_100", "PSQ_100"]
 
 trend_engine:
   mom_lookback_days: [126]
@@ -31,15 +36,16 @@ meanrev_engine:
 
 allocator:
   bull:
-    trend: [0.55, 0.60, 0.65]
+    trend: [0.55, 0.65]
     meanrev: [0.05]
-    defensive: [0.40, 0.35, 0.30]
-  
+    defensive: [0.40, 0.30]
+
+  # ✅ BEAR/CRASH는 100% risk_off로 보내서 “회피”를 강제
   bear:
-    trend: [0.00, 0.05]
+    trend: [0.00]
     meanrev: [0.00]
-    defensive: [1.00, 0.95]
-  
+    defensive: [1.00]
+
   crash:
     trend: [0.00]
     meanrev: [0.00]
