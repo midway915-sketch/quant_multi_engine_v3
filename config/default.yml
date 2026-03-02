@@ -15,8 +15,8 @@ state:
 
 crash:
   enabled: true
-  lookback_days: 20
-  threshold: -0.15
+  lookback_days: 12
+  threshold: -0.10
 
 trend_engine:
   universe: ["QQQ","SPY","SOXX"]
