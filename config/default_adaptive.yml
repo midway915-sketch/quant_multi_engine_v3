@@ -1,0 +1,70 @@
+data:
+  tickers: ["SPY","QQQ","SOXX","SHY","GLD","SGOV","BIL"]
+  start: "2000-01-01"
+
+portfolio:
+  rebalance: "weekly"
+  when: "week_end"      # W-FRI
+  entry: "next_close"   # signals at t used from t+1
+
+state:
+  base_ticker: "SPY"
+  ma_days: 200
+  min_hold_days: 5
+
+crash:
+  enabled: true
+  lookback_days: 12
+  threshold: -0.10
+
+trend_engine:
+  mom_lookback_days: 126
+  candidates: ["QQQ","SPY","SOXX"]
+  top_n: 1
+
+meanrev_engine:
+  base: "SPY"
+  lookback_days: 20
+  drop_threshold: -0.10
+  hold_days: 5
+  take_profit: 0.06
+  stop_loss: -0.06
+  candidates: ["QQQ","SPY","SOXX"]
+
+risk_off:
+  mode: "SGOV_100"
+
+allocator:
+  bull:   {trend: 0.70, meanrev: 0.00, defensive: 0.30}
+  bear:   {trend: 0.00, meanrev: 0.00, defensive: 1.00}
+  crash:  {trend: 0.00, meanrev: 0.00, defensive: 1.00}
+
+costs:
+  buy: 0.0007
+  sell: 0.0007
+
+adaptive:
+  enabled: true
+  override_bull_allocator: true
+
+  vol:
+    base_ticker: "SPY"
+    lookback_days: 20
+    regime_window_days: 756
+    high_q: 0.80
+    low_q: 0.20
+
+  bull_trend_weights:
+    high_vol: 0.60
+    normal_vol: 0.70
+    low_vol: 0.75
+
+  soxx:
+    enabled: true
+    block_if_high_vol: true
+    allow_if:
+      compare_to: "QQQ"
+      require_outperformance: 0.00
+
+debug:
+  state: false
