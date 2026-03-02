@@ -1,157 +1,211 @@
+#!/usr/bin/env python3
 from __future__ import annotations
+
 import argparse
 import json
+import math
 import os
 import time
-import itertools
-import yaml
+from itertools import product
+from typing import Any, Dict, List, Tuple
+
 import pandas as pd
+import yaml
 
 from src.core.data import download_prices_and_build_proxies
-from src.core.utils import deep_set, flatten_grid, deep_copy
 from src.core.meta import run_meta_portfolio
 from src.core.metrics import compute_metrics
 
 
-def load_yaml(path: str):
-    with open(path, "r") as f:
-        return yaml.safe_load(f)
+def deep_set(d: dict, key_path: str, value: Any) -> None:
+    """
+    Set nested dict key via dot-path, creating dicts if needed.
+    Example: deep_set(cfg, "allocator.bull.trend", 0.8)
+    """
+    parts = key_path.split(".")
+    cur = d
+    for p in parts[:-1]:
+        if p not in cur or not isinstance(cur[p], dict):
+            cur[p] = {}
+        cur = cur[p]
+    cur[parts[-1]] = value
 
 
-def save_json(path: str, obj):
-    with open(path, "w") as f:
-        json.dump(obj, f, indent=2)
+def deep_merge(base: dict, overlay: dict) -> dict:
+    """
+    Recursively merge overlay onto base (non-mutating).
+    """
+    out = dict(base)
+    for k, v in overlay.items():
+        if k in out and isinstance(out[k], dict) and isinstance(v, dict):
+            out[k] = deep_merge(out[k], v)
+        else:
+            out[k] = v
+    return out
 
 
-def _validate_weights(cfg) -> bool:
-    for k in ["bull", "bear", "crash"]:
-        w = cfg["allocator"][k]
-        s = float(w["trend"]) + float(w["meanrev"]) + float(w["defensive"])
-        if abs(s - 1.0) > 1e-9:
-            return False
-        if min(w["trend"], w["meanrev"], w["defensive"]) < 0:
-            return False
-    return True
+def make_param_sets(grid: dict) -> List[dict]:
+    """
+    grid yaml is a nested dict where leaves are lists (scan values).
+    Create list of param dicts (nested) corresponding to cartesian product.
+
+    Example:
+      grid:
+        state:
+          ma_days: [200,250]
+        allocator:
+          bull:
+            trend: [0.7,0.8]
+    """
+    # flatten dot-path -> list(values)
+    flat: List[Tuple[str, List[Any]]] = []
+
+    def walk(node: Any, prefix: str = ""):
+        if isinstance(node, dict):
+            for k, v in node.items():
+                p = f"{prefix}.{k}" if prefix else k
+                walk(v, p)
+        else:
+            # leaf: must be list for grid scan; allow scalar as single choice
+            if isinstance(node, list):
+                flat.append((prefix, node))
+            else:
+                flat.append((prefix, [node]))
+
+    walk(grid)
+
+    keys = [k for k, _ in flat]
+    values_lists = [vals for _, vals in flat]
+
+    param_sets = []
+    for combo in product(*values_lists):
+        p: dict = {}
+        for k, v in zip(keys, combo):
+            deep_set(p, k, v)
+        param_sets.append(p)
+    return param_sets
+
+
+def short_param_id(param_dict: dict) -> str:
+    s = json.dumps(param_dict, sort_keys=True, separators=(",", ":"))
+    # short deterministic id (10 hex)
+    import hashlib
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()[:10]
+
+
+def ensure_dir(path: str) -> None:
+    os.makedirs(path, exist_ok=True)
+
+
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", required=True, help="config/default.yml")
+    ap.add_argument("--grid", required=True, help="config/grid_fast.yml")
+    ap.add_argument("--out", required=True, help="out/grid_fast")
+    return ap.parse_args()
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True)
-    ap.add_argument("--grid", required=True)
-    ap.add_argument("--out", required=True)
-    args = ap.parse_args()
+    args = parse_args()
+    out_dir = args.out
+    ensure_dir(out_dir)
 
-    os.makedirs(args.out, exist_ok=True)
+    # --- load yaml ---
+    with open(args.config, "r", encoding="utf-8") as f:
+        base_cfg = yaml.safe_load(f)
+    with open(args.grid, "r", encoding="utf-8") as f:
+        grid_cfg = yaml.safe_load(f)
 
-    base_cfg = load_yaml(args.config)
-    grid = load_yaml(args.grid)
+    # grid_cfg is the scan space; param_sets are nested dict overlays
+    param_sets = make_param_sets(grid_cfg)
+    n = len(param_sets)
+
+    # --- download prices + build proxies (once) ---
+    prices = download_prices_and_build_proxies(base_cfg)
+    prices_path = os.path.join(out_dir, "prices.csv")
+    prices.to_csv(prices_path, index=True)
+
+    # --- iterate grid ---
+    best = None
+    best_row = None
+    rows = []
 
     t0 = time.time()
-    prices = download_prices_and_build_proxies(base_cfg)
-    prices.to_csv(os.path.join(args.out, "prices.csv"))
-    print(f"[INFO] prices shape={prices.shape} ({time.time()-t0:.1f}s)")
+    for i, overlay in enumerate(param_sets, 1):
+        cfg = deep_merge(base_cfg, overlay)
 
-    grid_items = flatten_grid(grid)
-    keys = list(grid_items.keys())
-    values = [grid_items[k] for k in keys]
-    combos = list(itertools.product(*values))
-    total = len(combos)
-    print(f"[INFO] grid keys={len(keys)} combos={total}")
-
-    rows = []
-    best = None
-    best_cagr = -1e18
-
-    started = time.time()
-
-    for i, combo in enumerate(combos, start=1):
-        cfg = deep_copy(base_cfg)
-        for k, v in zip(keys, combo):
-            deep_set(cfg, k, v)
-
-        # auto-fill implicit weights
-        for bucket in ["bull", "bear"]:
-            tr = float(cfg["allocator"][bucket]["trend"])
-            df = float(cfg["allocator"][bucket]["defensive"])
-            cfg["allocator"][bucket]["meanrev"] = 1.0 - (tr + df)
-
-        mr = float(cfg["allocator"]["crash"]["meanrev"])
-        df = float(cfg["allocator"]["crash"]["defensive"])
-        cfg["allocator"]["crash"]["trend"] = 1.0 - (mr + df)
-
-        if not _validate_weights(cfg):
-            continue
-
-        t1 = time.time()
+        # ✅ guard: if any allocator values are still lists, the grid wasn't expanded properly
+        # (this should not happen with make_param_sets)
+        for bucket in ["bull", "bear", "crash"]:
+            for k in ["trend", "meanrev", "defensive"]:
+                v = cfg["allocator"][bucket][k]
+                if isinstance(v, list):
+                    raise ValueError(
+                        f"Allocator value is list after merge: allocator.{bucket}.{k}={v}. "
+                        f"Grid expansion failed; ensure scan values are only in grid.yml and expanded by run_grid."
+                    )
 
         eq, choice_log, picks, holdings_daily, holdings_weekly = run_meta_portfolio(prices, cfg)
         met = compute_metrics(eq)
 
-        rows.append({
-            "idx": i,
-            "start": met["start"],
-            "end": met["end"],
-            "years": met["years"],
-            "seed_multiple": met["seed_multiple"],
-            "cagr": met["cagr"],
-            "mdd": met["mdd"],
+        # recent 10y metrics
+        end = eq.index.max()
+        start_10y = end - pd.DateOffset(years=10)
+        eq_10y = eq.loc[eq.index >= start_10y]
+        met_10y = compute_metrics(eq_10y) if len(eq_10y) > 10 else {"seed_multiple": math.nan, "cagr": math.nan, "mdd": math.nan}
 
-            "start_10y": met["start_10y"],
-            "end_10y": met["end_10y"],
-            "years_10y": met["years_10y"],
-            "seed_multiple_10y": met["seed_multiple_10y"],
-            "cagr_10y": met["cagr_10y"],
-            "mdd_10y": met["mdd_10y"],
+        pid = short_param_id(overlay)
 
-            "params": json.dumps({k: v for k, v in zip(keys, combo)}, ensure_ascii=False),
-        })
+        row = {
+            "param_id": pid,
+            "seed_multiple": float(met["seed_multiple"]),
+            "cagr": float(met["cagr"]),
+            "mdd": float(met["mdd"]),
+            "seed_multiple_10y": float(met_10y["seed_multiple"]),
+            "cagr_10y": float(met_10y["cagr"]),
+            "mdd_10y": float(met_10y["mdd"]),
+        }
+        # friendly percent columns
+        row["cagr_pct"] = row["cagr"] * 100.0
+        row["mdd_pct"] = row["mdd"] * 100.0
+        row["cagr_10y_pct"] = row["cagr_10y"] * 100.0
+        row["mdd_10y_pct"] = row["mdd_10y"] * 100.0
 
-        cagr = float(met["cagr"])
-        if cagr > best_cagr:
-            best_cagr = cagr
-            best = {
-                "params": {k: v for k, v in zip(keys, combo)},
-                "metrics": met,
-                "equity_curve": eq,
-                "engine_choice_log": choice_log,
-                "picks_top2_weekly": picks,
-                "holdings_daily": holdings_daily,
-                "holdings_weekly": holdings_weekly,
-            }
+        rows.append(row)
 
-        elapsed = time.time() - started
-        avg = elapsed / i
-        eta = avg * (total - i)
+        # best by CAGR (you can change to 10y CAGR etc.)
+        if (best is None) or (row["cagr"] > best):
+            best = row["cagr"]
+            best_row = row
+            best_params = overlay
 
-        print(
-            f"[PROGRESS] {i}/{total} iter={time.time()-t1:.2f}s "
-            f"elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m best_CAGR={best_cagr*100:.2f}%"
-        )
+            # write best-run artifacts continuously (so even if action stops you still have them)
+            eq.to_csv(os.path.join(out_dir, "equity_curve.csv"), index=True)
+            pd.DataFrame(choice_log).to_csv(os.path.join(out_dir, "engine_choice_log.csv"), index=False)
+            picks.to_csv(os.path.join(out_dir, "picks_top2_weekly.csv"), index=False)
+            holdings_daily.to_csv(os.path.join(out_dir, "holdings_daily.csv"), index=False)
+            holdings_weekly.to_csv(os.path.join(out_dir, "holdings_weekly.csv"), index=False)
+            with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
+                json.dump({"all": met, "recent_10y": met_10y}, f, indent=2)
 
+        # progress
+        elapsed = time.time() - t0
+        per = elapsed / i
+        eta = per * (n - i)
+        if i == 1 or i % max(1, n // 20) == 0 or i == n:
+            print(f"[PROGRESS] {i}/{n} iter={per:.2f}s elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m best_CAGR={(best*100):.2f}%")
+
+    # --- write summary + best_params ---
     summary = pd.DataFrame(rows).sort_values("cagr", ascending=False)
-    summary_path = os.path.join(args.out, "summary.csv")
+    summary_path = os.path.join(out_dir, "summary.csv")
     summary.to_csv(summary_path, index=False)
-
-    if best is None:
-        raise RuntimeError("No valid runs (weights validation failed?)")
-
-    save_json(os.path.join(args.out, "best_params.json"), best["params"])
-    save_json(os.path.join(args.out, "metrics.json"), best["metrics"])
-    best["equity_curve"].to_csv(os.path.join(args.out, "equity_curve.csv"), header=["equity"])
-
-    pd.DataFrame(best["engine_choice_log"]).to_csv(os.path.join(args.out, "engine_choice_log.csv"), index=False)
-
-    if isinstance(best["picks_top2_weekly"], pd.DataFrame) and not best["picks_top2_weekly"].empty:
-        best["picks_top2_weekly"].to_csv(os.path.join(args.out, "picks_top2_weekly.csv"), index=False)
-
-    if isinstance(best["holdings_daily"], pd.DataFrame) and not best["holdings_daily"].empty:
-        best["holdings_daily"].to_csv(os.path.join(args.out, "holdings_daily.csv"), index=False)
-
-    if isinstance(best["holdings_weekly"], pd.DataFrame) and not best["holdings_weekly"].empty:
-        best["holdings_weekly"].to_csv(os.path.join(args.out, "holdings_weekly.csv"), index=False)
-
     print(f"[DONE] summary -> {summary_path}")
-    print(f"[DONE] best_CAGR={best_cagr*100:.2f}% out={args.out}")
+
+    best_params_path = os.path.join(out_dir, "best_params.json")
+    with open(best_params_path, "w", encoding="utf-8") as f:
+        json.dump({"param_id": best_row["param_id"], "overlay": best_params}, f, indent=2)
+    print(f"[DONE] best_params -> {best_params_path}")
+    print(f"[DONE] best_CAGR={(best*100):.2f}% out={out_dir}")
 
 
 if __name__ == "__main__":
