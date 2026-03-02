@@ -76,11 +76,6 @@ def ensure_dir(path: str) -> None:
 
 
 def flatten_dict(d: Any, prefix: str = "") -> Dict[str, Any]:
-    """
-    Flatten nested dict into dot paths.
-    Example: {"a":{"b":1}} -> {"a.b":1}
-    Lists are JSON-stringified to keep summary.csv rectangular.
-    """
     out: Dict[str, Any] = {}
     if isinstance(d, dict):
         for k, v in d.items():
@@ -99,9 +94,11 @@ def parse_args():
     ap.add_argument("--grid", required=True, help="config/grid_fast.yml")
     ap.add_argument("--out", required=True, help="out/grid_fast")
 
-    # ✅ shard options (for GitHub Actions matrix parallelism)
     ap.add_argument("--shard-index", type=int, default=0, help="0-based shard index")
     ap.add_argument("--shard-count", type=int, default=1, help="number of shards (>=1)")
+
+    # ✅ new: reuse prebuilt prices.csv to avoid per-shard downloads
+    ap.add_argument("--prices-csv", default="", help="Path to prebuilt prices.csv (if set, skip download)")
     return ap.parse_args()
 
 
@@ -126,7 +123,6 @@ def main():
     if n_all <= 0:
         raise ValueError("Grid produced 0 param sets. Check grid.yml format.")
 
-    # ✅ stable shard split: index modulo shard_count
     param_sets = [p for j, p in enumerate(all_param_sets) if (j % args.shard_count) == args.shard_index]
     n = len(param_sets)
     if n <= 0:
@@ -134,7 +130,6 @@ def main():
             f"This shard has 0 param sets (shard_index={args.shard_index}, shard_count={args.shard_count}, total={n_all})."
         )
 
-    # write shard info (helps debugging + aggregation sanity)
     with open(os.path.join(out_dir, "shard_info.json"), "w", encoding="utf-8") as f:
         json.dump(
             {
@@ -142,14 +137,22 @@ def main():
                 "shard_count": args.shard_count,
                 "total_param_sets": n_all,
                 "this_shard_param_sets": n,
+                "prices_csv": args.prices_csv,
             },
             f,
             indent=2,
             ensure_ascii=False,
         )
 
-    # download prices once per shard
-    prices = download_prices_and_build_proxies(base_cfg)
+    # ✅ prices: load from csv if provided, else download
+    if args.prices_csv:
+        if not os.path.exists(args.prices_csv):
+            raise FileNotFoundError(f"--prices-csv not found: {args.prices_csv}")
+        prices = pd.read_csv(args.prices_csv, index_col=0, parse_dates=True)
+    else:
+        prices = download_prices_and_build_proxies(base_cfg)
+
+    # always persist prices used by this shard (debug/repro)
     prices.to_csv(os.path.join(out_dir, "prices.csv"), index=True)
 
     best = None
@@ -163,7 +166,6 @@ def main():
     for i, overlay in enumerate(param_sets, 1):
         cfg = deep_merge(base_cfg, overlay)
 
-        # safety guard: allocator 값이 list로 남아있으면 grid 확장 실패
         if "allocator" in cfg:
             for bucket in ("bull", "bear", "crash"):
                 if bucket in cfg["allocator"]:
@@ -171,14 +173,12 @@ def main():
                         v = cfg["allocator"][bucket].get(k)
                         if isinstance(v, list):
                             raise ValueError(
-                                f"Allocator value is list after merge: allocator.{bucket}.{k}={v}. "
-                                f"Grid expansion failed."
+                                f"Allocator value is list after merge: allocator.{bucket}.{k}={v}. Grid expansion failed."
                             )
 
         eq, choice_log, picks, holdings_daily, holdings_weekly = run_meta_portfolio(prices, cfg)
         met = compute_metrics(eq)
 
-        # recent 10y metrics
         end = eq.index.max()
         start_10y = end - pd.DateOffset(years=10)
         eq_10y = eq.loc[eq.index >= start_10y]
@@ -189,7 +189,6 @@ def main():
 
         pid = short_param_id(overlay)
 
-        # ---- summary row ----
         row = {
             "param_id": pid,
             "seed_multiple": float(met["seed_multiple"]),
@@ -204,16 +203,13 @@ def main():
         row["cagr_10y_pct"] = row["cagr_10y"] * 100.0
         row["mdd_10y_pct"] = row["mdd_10y"] * 100.0
 
-        # include params in summary.csv
         row["params_json"] = json.dumps(overlay, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
-
         flat_params = flatten_dict(overlay)
         for k, v in flat_params.items():
             row[f"params__{k}"] = v
 
         rows.append(row)
 
-        # best by CAGR (per shard)
         if (best is None) or (row["cagr"] > best):
             best = row["cagr"]
             best_row = row
@@ -227,7 +223,6 @@ def main():
             with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
                 json.dump({"all": met, "recent_10y": met_10y}, f, indent=2, ensure_ascii=False)
 
-        # progress + ETA (keep)
         elapsed = time.time() - t0
         per = elapsed / i
         eta = per * (n - i)
