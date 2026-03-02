@@ -3,12 +3,12 @@ data:
 
 state:
   base_ticker: ["SPY"]
-  ma_days: [150, 180, 200]
-  min_hold_days: [0, 3, 5]
+  ma_days: [150, 160, 170, 180, 190, 200]
+  min_hold_days: [0, 3, 5, 7, 9]
 
 crash:
-  lookback_days: [10, 12]
-  threshold: [-0.10, -0.12]
+  lookback_days: [10, 12, 14, 16]
+  threshold: [-0.10]
 
 risk_off:
   mode: ["SGOV_100"]
@@ -32,9 +32,9 @@ meanrev_engine:
 
 allocator:
   bull:
-    trend: [0.65, 0.70]
+    trend: [0.70, 0.75]
     meanrev: [0.00]
-    defensive: [0.35, 0.30]   # 합이 1.0 되게(0.65/0.70에 맞춰)
+    defensive: [0.30, 0.25]   # 합이 1.0 되게(0.65/0.70에 맞춰)
   bear:
     trend: [0.00]
     meanrev: [0.00]
