@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import yfinance as yf
 import pandas as pd
 
@@ -16,7 +17,7 @@ def download_prices_and_build_proxies(cfg) -> pd.DataFrame:
         start=cfg["data"]["start"],
         auto_adjust=False,
         progress=False,
-        group_by="column"
+        group_by="column",
     )
 
     if df.empty:
@@ -42,12 +43,21 @@ def download_prices_and_build_proxies(cfg) -> pd.DataFrame:
     px = px.dropna(how="all").sort_index().ffill()
 
     # daily returns for proxy building
-    rets = px.pct_change().fillna(0.0)
+    rets = px.pct_change()
 
-    def make_proxy(base: str, name: str, k: float):
+    def make_proxy(base: str, name: str, k: float) -> None:
+        """
+        Build kx daily-return proxy starting at 1.0, then cumprod.
+        NOTE: This is a synthetic proxy (no fees/decay/borrow), used only pre-listing.
+        """
         if base not in px.columns:
             return
-        proxy = (1.0 + (rets[base] * k)).cumprod()
+
+        r = rets[base].fillna(0.0)
+        # prevent <= -100% step (can happen when k*ret <= -1)
+        step = (1.0 + k * r).clip(lower=1e-6)
+
+        proxy = step.cumprod()
         px[name] = proxy
 
     # 3x proxies (pre-listing)
@@ -60,14 +70,43 @@ def download_prices_and_build_proxies(cfg) -> pd.DataFrame:
     make_proxy("SPY", "SSO_PROXY", 2.0)
     make_proxy("SOXX", "USD_PROXY", 2.0)
 
-    def make_mix(real: str, proxy: str, mix_name: str):
+    def make_mix(real: str, proxy: str, mix_name: str) -> None:
+        """
+        Create MIX series:
+        - use PROXY before real ETF listing
+        - use REAL from listing onward
+        - **rebase PROXY level** to match REAL just before the switch to avoid discontinuity
+        """
         if proxy not in px.columns:
             return
+
         mix = px[proxy].copy()
+
         if real in px.columns:
             real_start = px[real].first_valid_index()
             if real_start is not None:
+                # Find previous available date (for continuity anchor)
+                idx = px.index
+                loc = idx.get_loc(real_start)
+                prev_date = idx[loc - 1] if isinstance(loc, int) and loc > 0 else None
+
+                # If we have a prev_date, match levels at prev_date
+                if prev_date is not None and pd.notna(px.at[prev_date, real]) and pd.notna(mix.at[prev_date]):
+                    denom = float(mix.at[prev_date])
+                    if denom != 0.0:
+                        scale = float(px.at[prev_date, real]) / denom
+                        mix = mix * scale
+                else:
+                    # Fallback: match at real_start itself (still avoids huge jump)
+                    if pd.notna(px.at[real_start, real]) and pd.notna(mix.at[real_start]):
+                        denom = float(mix.at[real_start])
+                        if denom != 0.0:
+                            scale = float(px.at[real_start, real]) / denom
+                            mix = mix * scale
+
+                # Switch to real from listing onward
                 mix.loc[real_start:] = px.loc[real_start:, real]
+
         px[mix_name] = mix
 
     # 3x mixes
