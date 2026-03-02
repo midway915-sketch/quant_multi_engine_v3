@@ -1,0 +1,191 @@
+name: run-grid-adaptive
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: "Base config yml (adaptive)"
+        required: true
+        default: "config/default_adaptive.yml"
+      grid_path:
+        description: "Grid config yml (adaptive)"
+        required: true
+        default: "config/grid_adaptive.yml"
+      out_dir:
+        description: "Output directory"
+        required: true
+        default: "out/grid_adaptive"
+      shard_count:
+        description: "Number of parallel shards"
+        required: true
+        default: "8"
+
+jobs:
+  # 1) Build prices.csv once (shared via artifacts)
+  build_prices:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build prices.csv (once)
+        run: |
+          mkdir -p "${{ inputs.out_dir }}"
+          python - <<PY
+          import os, yaml, pandas as pd
+          from src.core.data import download_prices_and_build_proxies
+
+          cfg_path = "${{ inputs.config_path }}"
+          out_dir = "${{ inputs.out_dir }}"
+          os.makedirs(out_dir, exist_ok=True)
+
+          with open(cfg_path, "r", encoding="utf-8") as f:
+              cfg = yaml.safe_load(f)
+
+          prices = download_prices_and_build_proxies(cfg)
+          prices_path = os.path.join(out_dir, "prices.csv")
+          prices.to_csv(prices_path, index=True)
+          print("[DONE] prices.csv ->", prices_path)
+          PY
+
+      - name: Upload prices.csv artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: adaptive-prices
+          if-no-files-found: error
+          path: |
+            ${{ inputs.out_dir }}/prices.csv
+
+  # 2) Run shards in parallel
+  run_shards:
+    needs: build_prices
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard_index: [0, 1, 2, 3, 4, 5, 6, 7]
+
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download prices.csv artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: adaptive-prices
+          path: _shared
+
+      - name: Run grid (adaptive) - shard
+        run: |
+          OUT="${{ inputs.out_dir }}/shard_${{ matrix.shard_index }}"
+          mkdir -p "$OUT"
+
+          # shard_count is fixed to 8 by default in inputs, and matrix has 8 indices.
+          python -m scripts.run_grid_adaptive \
+            --config "${{ inputs.config_path }}" \
+            --grid "${{ inputs.grid_path }}" \
+            --out "$OUT" \
+            --shard-index "${{ matrix.shard_index }}" \
+            --shard-count "${{ inputs.shard_count }}" \
+            --prices-csv "_shared/prices.csv"
+
+      - name: Debug - list shard outputs
+        if: always()
+        run: |
+          echo "[DEBUG] shard=${{ matrix.shard_index }}"
+          echo "----- ls -la ${{ inputs.out_dir }}/shard_${{ matrix.shard_index }} -----"
+          ls -la "${{ inputs.out_dir }}/shard_${{ matrix.shard_index }}" || true
+          echo "----- find shard (maxdepth 2) -----"
+          find "${{ inputs.out_dir }}/shard_${{ matrix.shard_index }}" -maxdepth 2 -type f -print || true
+
+      - name: Upload shard artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-adaptive-shard-${{ matrix.shard_index }}
+          if-no-files-found: warn
+          path: |
+            ${{ inputs.out_dir }}/shard_${{ matrix.shard_index }}/
+
+  # 3) Merge summaries (best-effort) into one CSV for convenience
+  merge:
+    needs: run_shards
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: _all
+
+      - name: Merge summary.csv files
+        run: |
+          python - <<PY
+          import os, glob
+          import pandas as pd
+
+          # shard artifacts downloaded under _all/grid-adaptive-shard-*/summary.csv
+          paths = glob.glob("_all/grid-adaptive-shard-*/summary.csv")
+          if not paths:
+            print("[WARN] No summary.csv found in shard artifacts.")
+            raise SystemExit(0)
+
+          dfs = []
+          for p in paths:
+            try:
+              df = pd.read_csv(p)
+              df["__source"] = os.path.basename(os.path.dirname(p))
+              dfs.append(df)
+            except Exception as e:
+              print("[WARN] failed reading", p, e)
+
+          if not dfs:
+            print("[WARN] No readable summary.csv.")
+            raise SystemExit(0)
+
+          merged = pd.concat(dfs, ignore_index=True)
+          merged = merged.sort_values("cagr", ascending=False)
+
+          out_dir = "merged"
+          os.makedirs(out_dir, exist_ok=True)
+          out_path = os.path.join(out_dir, "summary_merged.csv")
+          merged.to_csv(out_path, index=False)
+          print("[DONE] merged summary ->", out_path)
+          PY
+
+      - name: Upload merged summary artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-adaptive-merged
+          if-no-files-found: warn
+          path: |
+            merged/summary_merged.csv
