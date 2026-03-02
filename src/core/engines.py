@@ -28,8 +28,8 @@ def run_trend_engine(prices: pd.DataFrame, cfg, state_df: pd.DataFrame):
     rebal = _weekly_dates(prices.index)
 
     # mapping base->proxy traded
-    mp = {"QQQ": "TQQQ_PROXY", "SPY": "UPRO_PROXY", "SOXX": "SOXL_PROXY"}
-
+    mp = {"QQQ": "TQQQ_MIX", "SPY": "UPRO_MIX", "SOXX": "SOXL_MIX"}
+    
     held = None
     equity = 1.0
     curve = []
