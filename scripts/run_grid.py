@@ -97,7 +97,7 @@ def parse_args():
     ap.add_argument("--shard-index", type=int, default=0, help="0-based shard index")
     ap.add_argument("--shard-count", type=int, default=1, help="number of shards (>=1)")
 
-    # ✅ new: reuse prebuilt prices.csv to avoid per-shard downloads
+    # reuse prebuilt prices.csv to avoid per-shard downloads
     ap.add_argument("--prices-csv", default="", help="Path to prebuilt prices.csv (if set, skip download)")
     return ap.parse_args()
 
@@ -144,7 +144,7 @@ def main():
             ensure_ascii=False,
         )
 
-    # ✅ prices: load from csv if provided, else download
+    # prices: load from csv if provided, else download
     if args.prices_csv:
         if not os.path.exists(args.prices_csv):
             raise FileNotFoundError(f"--prices-csv not found: {args.prices_csv}")
@@ -152,7 +152,6 @@ def main():
     else:
         prices = download_prices_and_build_proxies(base_cfg)
 
-    # always persist prices used by this shard (debug/repro)
     prices.to_csv(os.path.join(out_dir, "prices.csv"), index=True)
 
     best = None
@@ -161,7 +160,11 @@ def main():
     rows: List[dict] = []
 
     t0 = time.time()
-    progress_every = max(1, n // 20)
+
+    # ✅ 더 자주: 대략 1%마다 + 최소 60초마다 한 번
+    progress_every = max(1, n // 100)
+    last_print_ts = 0.0
+    print_interval_sec = 60.0
 
     for i, overlay in enumerate(param_sets, 1):
         cfg = deep_merge(base_cfg, overlay)
@@ -223,13 +226,19 @@ def main():
             with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
                 json.dump({"all": met, "recent_10y": met_10y}, f, indent=2, ensure_ascii=False)
 
-        elapsed = time.time() - t0
+        # progress + ETA (more frequent)
+        now = time.time()
+        elapsed = now - t0
         per = elapsed / i
         eta = per * (n - i)
-        if i == 1 or i % progress_every == 0 or i == n:
+
+        should_print = (i == 1) or (i == n) or (i % progress_every == 0) or ((now - last_print_ts) >= print_interval_sec)
+        if should_print:
+            last_print_ts = now
+            best_cagr_pct = (best * 100.0) if best is not None else float("nan")
             print(
                 f"[PROGRESS] shard={args.shard_index}/{args.shard_count} {i}/{n} "
-                f"iter={per:.2f}s elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m best_CAGR={(best*100):.2f}%"
+                f"iter={per:.2f}s elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m best_CAGR={best_cagr_pct:.2f}%"
             )
 
     summary = pd.DataFrame(rows).sort_values("cagr", ascending=False)
