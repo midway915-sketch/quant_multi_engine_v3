@@ -2,45 +2,45 @@ data:
   prices_start: ["2000-01-01"]
 
 state:
-  base_ticker: ["SPY", "QQQ"]
+  base_ticker: ["SPY"]          # 레짐 판단 안정성 우선
   ma_days: [200]
-  min_hold_days: [0, 5]
+  min_hold_days: [5]            # 잦은 반전매매 줄여서 MDD 완화
 
 crash:
-  lookback_days: [5, 10, 20]
-  threshold: [-0.08, -0.10, -0.12]
+  lookback_days: [10, 20]
+  threshold: [-0.08, -0.10]     # 급락 감지 조금 빠르게
 
 risk_off:
-  mode: ["SHY_100"]
+  mode: ["SHY_100"]             # 방어는 단순/강하게
 
 trend_engine:
-  mom_lookback_days: [126]
+  mom_lookback_days: [126, 168]
   candidates:
-    - ["QQQ", "SPY"]   # SOXX는 일단 제거 유지
-  top_n: [1]
+    - ["QQQ", "SPY"]            # SOXX 제외
+  top_n: [1]                    # 집중도/변동성 억제
 
 meanrev_engine:
   lookback_days: [20]
-  drop_threshold: [-0.12]
+  drop_threshold: [-0.10, -0.12]
   hold_days: [5]
-  take_profit: [0.08]
-  stop_loss: [-0.08]
+  take_profit: [0.06, 0.08]
+  stop_loss: [-0.06, -0.08]
   candidates:
     - ["QQQ", "SPY"]
-  base: ["SPY"]
+  base: ["SPY"]                 # 신호 기준 안정화
 
 allocator:
   bull:
-    trend: [0.8]
-    meanrev: [0.1]
-    defensive: [0.1]
+    trend: [0.45, 0.55, 0.65]
+    meanrev: [0.05, 0.10]
+    defensive: [0.50, 0.40, 0.25]   # (합 1.00 맞춰짐 조합으로만 사용)
 
   bear:
-    trend: [0.35]
-    meanrev: [0.15]
-    defensive: [0.5]
+    trend: [0.00, 0.10, 0.20]
+    meanrev: [0.00, 0.05]
+    defensive: [1.00, 0.90, 0.80]
 
   crash:
-    trend: [0.0]
-    meanrev: [0.0]
-    defensive: [1.0]
+    trend: [0.00]
+    meanrev: [0.00]
+    defensive: [1.00]
