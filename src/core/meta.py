@@ -1,4 +1,5 @@
 from __future__ import annotations
+
 import pandas as pd
 import numpy as np
 
@@ -68,11 +69,50 @@ def _normalize_weights(h: dict) -> dict:
     return {k: float(v / s) for k, v in h.items()}
 
 
+def _turnover_cost_frac(
+    w_prev: dict,
+    w_new: dict,
+    buy_cost: float,
+    sell_cost: float,
+) -> float:
+    """
+    Compute portfolio-level cost fraction for transitioning w_prev -> w_new.
+    Costs are applied on notional traded at rebalance close.
+
+    - buy_cost applies to increases in weight (delta > 0)
+    - sell_cost applies to decreases in weight (delta < 0)
+
+    Returns:
+      cost_frac in [0, +inf) to be applied as: equity *= (1 - cost_frac)
+    """
+    if buy_cost <= 0 and sell_cost <= 0:
+        return 0.0
+
+    keys = set(w_prev.keys()) | set(w_new.keys())
+    buy_turn = 0.0
+    sell_turn = 0.0
+
+    for k in keys:
+        prev = float(w_prev.get(k, 0.0))
+        new = float(w_new.get(k, 0.0))
+        d = new - prev
+        if d > 0:
+            buy_turn += d
+        elif d < 0:
+            sell_turn += (-d)
+
+    cost_frac = buy_turn * float(buy_cost) + sell_turn * float(sell_cost)
+    if cost_frac < 0:
+        cost_frac = 0.0
+    return float(cost_frac)
+
+
 def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     """
     Lookahead-free:
       - Today's return uses yesterday's confirmed holdings
       - Signals/picks computed at date dt are applied starting next trading day
+      - Trading costs are charged at dt close when switching into tomorrow's holdings
 
     Returns:
       equity: pd.Series
@@ -112,6 +152,11 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     # ---- Allocator / defensive ----
     alloc = cfg["allocator"]
     risk_off_mode = (cfg.get("risk_off", {}) or {}).get("mode", "SHY_100")
+
+    # ---- Costs ----
+    costs_cfg = cfg.get("costs", {}) or {}
+    buy_cost = float(costs_cfg.get("buy", 0.0) or 0.0)
+    sell_cost = float(costs_cfg.get("sell", 0.0) or 0.0)
 
     # Weekly rebalance dates (Fridays present in price index)
     week_end = _week_end_index(prices.index)
@@ -156,8 +201,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     for i, dt in enumerate(idx):
         st = state_df.loc[dt, "state"]
 
-        # 1) ---- APPLY TODAY'S RETURN USING h_cur (yesterday-confirmed) ----
-        # log today's holdings
+        # 1) ---- LOG TODAY'S HOLDINGS (h_cur) ----
         for t, w in h_cur.items():
             holdings_daily_rows.append({
                 "date": str(dt.date()),
@@ -166,15 +210,15 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                 "state": st
             })
 
+        # 2) ---- APPLY TODAY'S RETURN USING h_cur (yesterday-confirmed) ----
         daily_ret = 0.0
         for t, w in h_cur.items():
             if t in returns.columns:
                 daily_ret += float(returns.loc[dt, t]) * float(w)
 
         equity *= (1.0 + daily_ret)
-        curve.append(equity)
 
-        # 2) ---- COMPUTE SIGNALS / DESIRED HOLDINGS FOR TOMORROW (h_next) ----
+        # 3) ---- COMPUTE SIGNALS / DESIRED HOLDINGS FOR TOMORROW (h_des) ----
         # (a) Trend weekly picks decided on rebalance dates (Fridays)
         if dt in reb_dates:
             m = mom.loc[dt, candidates]
@@ -265,8 +309,31 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         if not h_des:
             h_des = {"SHY": 1.0}
 
-        # 3) ---- COMMIT TOMORROW HOLDINGS (lookahead-free) ----
-        # only if there *is* a next trading day
+        # 4) ---- CHARGE TRADING COSTS AT dt CLOSE (for switching into tomorrow holdings) ----
+        cost_frac = 0.0
+        buy_turn = 0.0
+        sell_turn = 0.0
+        if i < len(idx) - 1:
+            # cost for rebalance from today's holdings -> tomorrow holdings
+            # NOTE: this is charged after today's return, before tomorrow's return
+            keys = set(h_cur.keys()) | set(h_des.keys())
+            for k in keys:
+                prev = float(h_cur.get(k, 0.0))
+                new = float(h_des.get(k, 0.0))
+                d = new - prev
+                if d > 0:
+                    buy_turn += d
+                elif d < 0:
+                    sell_turn += (-d)
+
+            cost_frac = float(buy_turn * buy_cost + sell_turn * sell_cost)
+            if cost_frac > 0:
+                equity *= (1.0 - cost_frac)
+
+        # 5) ---- RECORD END-OF-DAY EQUITY (AFTER COSTS) ----
+        curve.append(equity)
+
+        # 6) ---- COMMIT TOMORROW HOLDINGS (lookahead-free) ----
         if i < len(idx) - 1:
             h_next = h_des
             h_cur = h_next
@@ -281,6 +348,9 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             "meanrev_active": bool(mr_active),
             "meanrev_ticker": mr_trade_col if mr_active else "",
             "rebalance_today": bool(dt in reb_dates),
+            "buy_turnover": float(buy_turn),
+            "sell_turnover": float(sell_turn),
+            "cost_frac": float(cost_frac),
         })
 
     equity_series = pd.Series(curve, index=prices.index, name="equity")
