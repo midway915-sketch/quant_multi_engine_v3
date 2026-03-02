@@ -12,13 +12,21 @@ on:
         required: true
         default: "config/grid_fast.yml"
       out_dir:
-        description: "Output directory"
+        description: "Base output directory (shards will be created under this)"
         required: true
         default: "out/grid_fast"
+      shard_count:
+        description: "Number of shards (parallel jobs)"
+        required: true
+        default: "4"
 
 jobs:
   run:
     runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        shard_index: [0, 1, 2, 3]
     env:
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: ${{ github.workspace }}
@@ -37,34 +45,75 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run grid (fast)
+      - name: Run grid shard
         run: |
-          mkdir -p "${{ inputs.out_dir }}"
+          OUT="${{ inputs.out_dir }}_shard_${{ matrix.shard_index }}"
+          mkdir -p "${OUT}"
           python -m scripts.run_grid \
             --config "${{ inputs.config_path }}" \
             --grid "${{ inputs.grid_path }}" \
-            --out "${{ inputs.out_dir }}"
+            --out "${OUT}" \
+            --shard-index "${{ matrix.shard_index }}" \
+            --shard-count "${{ inputs.shard_count }}"
 
-      # ✅ 실패/성공 상관없이 생성물 위치 확인(디버그)
       - name: Debug - list outputs
         if: always()
         run: |
-          echo "[DEBUG] pwd=$(pwd)"
-          echo "[DEBUG] workspace=${{ github.workspace }}"
-          echo "[DEBUG] out_dir=${{ inputs.out_dir }}"
-          echo "----- ls -la out -----"
-          ls -la out || true
-          echo "----- ls -la out_dir -----"
-          ls -la "${{ inputs.out_dir }}" || true
-          echo "----- find out_dir (maxdepth 2) -----"
-          find "${{ inputs.out_dir }}" -maxdepth 2 -type f -print || true
+          OUT="${{ inputs.out_dir }}_shard_${{ matrix.shard_index }}"
+          echo "[DEBUG] out_dir=${OUT}"
+          ls -la "${OUT}" || true
+          find "${OUT}" -maxdepth 2 -type f -print || true
 
-      # ✅ 특정 파일 지정 X: out_dir 전체를 아티팩트로 올림
-      - name: Upload artifacts
+      - name: Upload artifacts (shard)
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: grid-fast-results
+          name: grid-fast-results-shard-${{ matrix.shard_index }}
           if-no-files-found: warn
           path: |
-            ${{ inputs.out_dir }}/
+            ${{ inputs.out_dir }}_shard_${{ matrix.shard_index }}/
+
+  aggregate:
+    runs-on: ubuntu-latest
+    needs: [run]
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: out/shards
+
+      - name: Debug - list downloaded shards
+        run: |
+          echo "----- find out/shards (maxdepth 4) -----"
+          find out/shards -maxdepth 4 -type f -print || true
+
+      - name: Aggregate summaries
+        run: |
+          python -m scripts.aggregate_grid \
+            --shards-root out/shards \
+            --out "${{ inputs.out_dir }}_merged"
+
+      - name: Upload artifacts (merged)
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-fast-results-merged
+          if-no-files-found: warn
+          path: |
+            ${{ inputs.out_dir }}_merged/
