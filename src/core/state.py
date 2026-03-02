@@ -8,7 +8,7 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     Returns DataFrame with columns:
       bull_flag (bool), bear_flag (bool), crash_flag (bool), state (str)
 
-    state priority: CRASH > BEAR > BULL
+    Priority: CRASH > BULL > BEAR
     Look-ahead prevention: signals use shift(1)
     """
     debug = bool(cfg.get("debug", {}).get("state", False))
@@ -24,9 +24,8 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
 
     ma = p.rolling(ma_days).mean()
 
-    bull_raw = (p > ma)                       # raw signal on same day (NOT used directly)
-    bull = bull_raw.shift(1).fillna(False)    # look-ahead safe
-    bear = (~bull).astype(bool)
+    bull_raw = (p > ma)                        # raw (same-day)
+    bull = bull_raw.shift(1).fillna(False)     # look-ahead safe
 
     crash_cfg = cfg.get("crash", {})
     crash_enabled = bool(crash_cfg.get("enabled", True))
@@ -35,7 +34,7 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     if crash_enabled:
         lb = int(crash_cfg["lookback_days"])
         thr = float(crash_cfg["threshold"])
-        r = p.pct_change(lb).shift(1)         # look-ahead safe
+        r = p.pct_change(lb).shift(1)          # look-ahead safe
         crash = (r <= thr).fillna(False)
 
     # ---- DEBUG BEFORE HYSTERESIS ----
@@ -79,12 +78,13 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
             print(f"[STATE-DEBUG] hysteresis min_hold_days={min_hold}")
             print(f"[STATE-DEBUG] bull_before_true={b1} ({r1*100:.2f}%) -> bull_after_true={b2} ({r2*100:.2f}%) first_after={first_after}")
 
-    bear = (~bull).astype(bool)
+    # ✅ Robust state assignment (fix)
+    # Default BEAR, promote to BULL where bull==True, then override to CRASH where crash==True.
+    state = pd.Series("BEAR", index=prices.index)
+    state.loc[bull] = "BULL"
+    state.loc[crash] = "CRASH"
 
-    state = pd.Series("BULL", index=prices.index)
-    state[bear] = "BEAR"
-    state[crash] = "CRASH"
-
+    bear = (state == "BEAR")
     out = pd.DataFrame(
         {
             "bull_flag": bull.astype(bool),
@@ -99,6 +99,13 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         vc = out["state"].value_counts(dropna=False).to_dict()
         print(f"[STATE-DEBUG] state_counts: {vc}")
 
+        # sanity check: bull True인데 state가 BULL이 아닌 날짜가 있는지
+        mismatch = out.index[(out["bull_flag"] == True) & (out["state"] != "BULL")]
+        if len(mismatch) > 0:
+            print(f"[STATE-DEBUG] WARNING: bull_flag True but state != BULL (n={len(mismatch)}) first={mismatch.min()}")
+        else:
+            print("[STATE-DEBUG] OK: bull_flag aligns with state=BULL")
+
     return out
 
 
@@ -108,15 +115,14 @@ def _min_hold_filter(bull_flag: pd.Series, min_hold_days: int) -> pd.Series:
       once state changes, keep previous state for min_hold_days.
     """
     bull_flag = bull_flag.astype(bool).copy()
-
     vals = bull_flag.values
     if len(vals) == 0:
         return bull_flag
 
     out = vals.copy()
-
     last = out[0]
     hold = 0
+
     for i in range(1, len(out)):
         if out[i] == last:
             hold = 0
