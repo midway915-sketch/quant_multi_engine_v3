@@ -1,25 +1,48 @@
-state.ma_days: [200]
-state.min_hold_days: [0]
+# config/grid_fast.yml
 
-crash.lookback_days: [20]
-crash.threshold: [-0.12]
+data:
+  prices_start: ["2000-01-01"]
 
-trend_engine.mom_lookback_days: [168]
+state:
+  base_ticker: ["SPY"]
+  ma_days: [200, 250]
+  min_hold_days: [0, 5]
 
-meanrev_engine.lookback_days: [20]
-meanrev_engine.drop_threshold: [-0.12]
-meanrev_engine.hold_days: [5]
-meanrev_engine.take_profit: [0.08]
-meanrev_engine.stop_loss: [-0.08]
-meanrev_engine.leverage: [1.5]
+crash:
+  lookback_days: [20]
+  threshold: [-0.12, -0.15]
 
-defensive_engine.mode: ["SHY"]
+risk_off:
+  mode: ["SHY_100", "SHY_70_GLD_30"]
 
-allocator.bull.trend: [0.7]
-allocator.bull.defensive: [0.2]
+trend_engine:
+  mom_lookback_days: [126, 168]
+  candidates:
+    - ["QQQ", "SPY", "SOXX"]
+  top_n: [1, 2]
 
-allocator.bear.trend: [0.50]
-allocator.bear.defensive: [0.50]
+meanrev_engine:
+  lookback_days: [20]
+  drop_threshold: [-0.12, -0.15]
+  hold_days: [5, 10]
+  take_profit: [0.08, 0.10]
+  stop_loss: [-0.08]
+  candidates:
+    - ["QQQ", "SPY", "SOXX"]
+  base: ["SPY"]   # ✅ MeanRev도 SPY로 시작
 
-allocator.crash.meanrev: [0.40]
-allocator.crash.defensive: [0.40]
+allocator:
+  bull:
+    trend: [0.7, 0.8]
+    meanrev: [0.1]
+    defensive: [0.2, 0.1]
+
+  bear:
+    trend: [0.35, 0.50]
+    meanrev: [0.15]
+    defensive: [0.50, 0.40]
+
+  crash:
+    trend: [0.05]
+    meanrev: [0.40, 0.50]
+    defensive: [0.50, 0.40]
