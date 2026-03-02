@@ -16,7 +16,8 @@ risk_off:
   # - SGOV_100: 초단기 T-bill (없으면 BIL_100으로 바꿔)
   # - SH_100: SPY -1x 인버스
   # - PSQ_100: QQQ -1x 인버스 (너 코드에 없으면 빼)
-  mode: ["SHY_100", "SGOV_100", "SH_100", "PSQ_100"]
+  risk_off:
+  mode: ["SGOV_100", "SGOV_90_SH_10", "SGOV_80_SH_20", "SGOV_90_PSQ_10", "SGOV_80_PSQ_20"]
 
 trend_engine:
   mom_lookback_days: [126]
