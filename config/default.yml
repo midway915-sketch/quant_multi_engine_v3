@@ -33,7 +33,7 @@ meanrev_engine:
   leverage: 1.5
 
 defensive_engine:
-  mode: "SHY"  # "SHY" or "CASH"
+  mode: "SHY_100"
 
 allocator:
   bull:   {trend: 0.70, meanrev: 0.10, defensive: 0.20}
