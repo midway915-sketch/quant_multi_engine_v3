@@ -42,8 +42,8 @@ allocator:
   crash:  {trend: 0.10, meanrev: 0.40, defensive: 0.50}
 
 costs:
-  buy: 0.0007
-  sell: 0.0007
+  buy: 0.0014
+  sell: 0.0014
 
 debug:
   state: false
