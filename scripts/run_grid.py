@@ -69,7 +69,7 @@ def main():
         for k, v in zip(keys, combo):
             deep_set(cfg, k, v)
 
-        # auto-fill implicit weights (meanrev/trend) from 2 keys if grid only sets 2
+        # auto-fill implicit weights
         for bucket in ["bull", "bear"]:
             tr = float(cfg["allocator"][bucket]["trend"])
             df = float(cfg["allocator"][bucket]["defensive"])
@@ -83,10 +83,10 @@ def main():
             continue
 
         t1 = time.time()
-        eq, choice_log, picks = run_meta_portfolio(prices, cfg)
+
+        eq, choice_log, picks, holdings_daily, holdings_weekly = run_meta_portfolio(prices, cfg)
         met = compute_metrics(eq)
 
-        # summary row
         rows.append({
             "idx": i,
             "start": met["start"],
@@ -115,6 +115,8 @@ def main():
                 "equity_curve": eq,
                 "engine_choice_log": choice_log,
                 "picks_top2_weekly": picks,
+                "holdings_daily": holdings_daily,
+                "holdings_weekly": holdings_weekly,
             }
 
         elapsed = time.time() - started
@@ -141,6 +143,12 @@ def main():
 
     if isinstance(best["picks_top2_weekly"], pd.DataFrame) and not best["picks_top2_weekly"].empty:
         best["picks_top2_weekly"].to_csv(os.path.join(args.out, "picks_top2_weekly.csv"), index=False)
+
+    if isinstance(best["holdings_daily"], pd.DataFrame) and not best["holdings_daily"].empty:
+        best["holdings_daily"].to_csv(os.path.join(args.out, "holdings_daily.csv"), index=False)
+
+    if isinstance(best["holdings_weekly"], pd.DataFrame) and not best["holdings_weekly"].empty:
+        best["holdings_weekly"].to_csv(os.path.join(args.out, "holdings_weekly.csv"), index=False)
 
     print(f"[DONE] summary -> {summary_path}")
     print(f"[DONE] best_CAGR={best_cagr*100:.2f}% out={args.out}")
