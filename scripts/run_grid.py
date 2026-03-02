@@ -70,12 +70,11 @@ def main():
             deep_set(cfg, k, v)
 
         # auto-fill implicit weights (meanrev/trend) from 2 keys if grid only sets 2
-        # bull/bear: meanrev = 1 - (trend + defensive)
         for bucket in ["bull", "bear"]:
             tr = float(cfg["allocator"][bucket]["trend"])
             df = float(cfg["allocator"][bucket]["defensive"])
             cfg["allocator"][bucket]["meanrev"] = 1.0 - (tr + df)
-        # crash: trend = 1 - (meanrev + defensive)
+
         mr = float(cfg["allocator"]["crash"]["meanrev"])
         df = float(cfg["allocator"]["crash"]["defensive"])
         cfg["allocator"]["crash"]["trend"] = 1.0 - (mr + df)
@@ -87,18 +86,27 @@ def main():
         eq, choice_log, picks = run_meta_portfolio(prices, cfg)
         met = compute_metrics(eq)
 
-        cagr = float(met["cagr"])
+        # summary row
         rows.append({
             "idx": i,
-            "cagr": cagr,
-            "mdd": float(met["mdd"]),
-            "seed_multiple": float(met["seed_multiple"]),
             "start": met["start"],
             "end": met["end"],
-            "years": float(met["years"]),
+            "years": met["years"],
+            "seed_multiple": met["seed_multiple"],
+            "cagr": met["cagr"],
+            "mdd": met["mdd"],
+
+            "start_10y": met["start_10y"],
+            "end_10y": met["end_10y"],
+            "years_10y": met["years_10y"],
+            "seed_multiple_10y": met["seed_multiple_10y"],
+            "cagr_10y": met["cagr_10y"],
+            "mdd_10y": met["mdd_10y"],
+
             "params": json.dumps({k: v for k, v in zip(keys, combo)}, ensure_ascii=False),
         })
 
+        cagr = float(met["cagr"])
         if cagr > best_cagr:
             best_cagr = cagr
             best = {
