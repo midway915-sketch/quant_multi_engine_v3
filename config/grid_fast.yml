@@ -1,3 +1,5 @@
+# config/grid_fast.yml  (SOXX removed + base=SPY fixed)
+
 data:
   prices_start: ["2000-01-01"]
 
@@ -16,18 +18,18 @@ risk_off:
 trend_engine:
   mom_lookback_days: [126, 168]
   candidates:
-    - ["QQQ", "SPY", "SOXX"]
-  top_n: [1]   # ✅ 고정 (2 -> 1)
+    - ["QQQ", "SPY"]
+  top_n: [1]
 
 meanrev_engine:
   lookback_days: [20]
   drop_threshold: [-0.12, -0.15]
   hold_days: [5, 10]
-  take_profit: [0.08]  # ✅ 고정 (2 -> 1)
+  take_profit: [0.08]
   stop_loss: [-0.08]
   candidates:
-    - ["QQQ", "SPY", "SOXX"]
-  base: ["SPY", "QQQ"]
+    - ["QQQ", "SPY"]
+  base: ["SPY"]   # ✅ 고정
 
 allocator:
   bull:
