@@ -10,8 +10,8 @@ portfolio:
 
 state:
   base_ticker: "SPY"
-  ma_days: 200
-  min_hold_days: 5
+  ma_days: 150
+  min_hold_days: 11
 
 crash:
   enabled: true
@@ -27,19 +27,19 @@ trend_engine:
 meanrev_engine:
   base_ticker: "SPY"
   lookback_days: 20
-  drop_threshold: -0.15
-  hold_days: 10
-  take_profit: 0.10
-  stop_loss: -0.08
-  leverage: 1.5
+  drop_threshold: -0.10
+  hold_days: 5
+  take_profit: 0.06
+  stop_loss: -0.06
+  leverage: 1
 
 defensive_engine:
   mode: "SGOV_100"
 
 allocator:
-  bull:   {trend: 0.70, meanrev: 0.10, defensive: 0.20}
-  bear:   {trend: 0.35, meanrev: 0.15, defensive: 0.50}
-  crash:  {trend: 0.10, meanrev: 0.40, defensive: 0.50}
+  bull:   {trend: 0.75, meanrev: 0.00, defensive: 0.25}
+  bear:   {trend: 0.00, meanrev: 0.00, defensive: 1.00}
+  crash:  {trend: 0.00, meanrev: 0.00, defensive: 1.00}
 
 costs:
   buy: 0.0014
