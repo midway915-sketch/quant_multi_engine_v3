@@ -7,10 +7,15 @@ import pandas as pd
 def download_prices_and_build_proxies(cfg) -> pd.DataFrame:
     base_tickers = list(cfg["data"]["tickers"])
 
+    # Real leveraged ETFs you already use
     real_3x = ["TQQQ", "UPRO", "SOXL"]
     real_2x = ["QLD", "SSO", "USD"]  # QQQ/SPY/SOXX의 2x 대응
 
-    tickers = sorted(set(base_tickers + real_3x + real_2x))
+    # ✅ Extra defensives / inverse (for risk_off.mode experiments)
+    # - These are "real" tickers; we will also build *_MIX columns using proxies pre-listing.
+    extra_real = ["BIL", "SGOV", "SH", "PSQ"]
+
+    tickers = sorted(set(base_tickers + real_3x + real_2x + extra_real))
 
     df = yf.download(
         tickers,
@@ -60,22 +65,12 @@ def download_prices_and_build_proxies(cfg) -> pd.DataFrame:
         proxy = step.cumprod()
         px[name] = proxy
 
-    # 3x proxies (pre-listing)
-    make_proxy("QQQ", "TQQQ_PROXY", 3.0)
-    make_proxy("SPY", "UPRO_PROXY", 3.0)
-    make_proxy("SOXX", "SOXL_PROXY", 3.0)
-
-    # 2x proxies (pre-listing)
-    make_proxy("QQQ", "QLD_PROXY", 2.0)
-    make_proxy("SPY", "SSO_PROXY", 2.0)
-    make_proxy("SOXX", "USD_PROXY", 2.0)
-
     def make_mix(real: str, proxy: str, mix_name: str) -> None:
         """
         Create MIX series:
         - use PROXY before real ETF listing
         - use REAL from listing onward
-        - **rebase PROXY level** to match REAL just before the switch to avoid discontinuity
+        - rebase PROXY level to match REAL around the switch to avoid discontinuity
         """
         if proxy not in px.columns:
             return
@@ -85,19 +80,18 @@ def download_prices_and_build_proxies(cfg) -> pd.DataFrame:
         if real in px.columns:
             real_start = px[real].first_valid_index()
             if real_start is not None:
-                # Find previous available date (for continuity anchor)
                 idx = px.index
                 loc = idx.get_loc(real_start)
                 prev_date = idx[loc - 1] if isinstance(loc, int) and loc > 0 else None
 
-                # If we have a prev_date, match levels at prev_date
+                # Prefer matching levels at prev_date if possible
                 if prev_date is not None and pd.notna(px.at[prev_date, real]) and pd.notna(mix.at[prev_date]):
                     denom = float(mix.at[prev_date])
                     if denom != 0.0:
                         scale = float(px.at[prev_date, real]) / denom
                         mix = mix * scale
                 else:
-                    # Fallback: match at real_start itself (still avoids huge jump)
+                    # Fallback: match at real_start
                     if pd.notna(px.at[real_start, real]) and pd.notna(mix.at[real_start]):
                         denom = float(mix.at[real_start])
                         if denom != 0.0:
@@ -109,6 +103,19 @@ def download_prices_and_build_proxies(cfg) -> pd.DataFrame:
 
         px[mix_name] = mix
 
+    # -------------------------
+    # Leveraged proxies/mixes
+    # -------------------------
+    # 3x proxies (pre-listing)
+    make_proxy("QQQ", "TQQQ_PROXY", 3.0)
+    make_proxy("SPY", "UPRO_PROXY", 3.0)
+    make_proxy("SOXX", "SOXL_PROXY", 3.0)
+
+    # 2x proxies (pre-listing)
+    make_proxy("QQQ", "QLD_PROXY", 2.0)
+    make_proxy("SPY", "SSO_PROXY", 2.0)
+    make_proxy("SOXX", "USD_PROXY", 2.0)
+
     # 3x mixes
     make_mix("TQQQ", "TQQQ_PROXY", "TQQQ_MIX")
     make_mix("UPRO", "UPRO_PROXY", "UPRO_MIX")
@@ -119,7 +126,25 @@ def download_prices_and_build_proxies(cfg) -> pd.DataFrame:
     make_mix("SSO", "SSO_PROXY", "SSO_MIX")
     make_mix("USD", "USD_PROXY", "USD_MIX")
 
+    # -------------------------
+    # ✅ Inverse equity proxies/mixes (-1x)
+    # -------------------------
+    make_proxy("SPY", "SH_PROXY", -1.0)   # -1x SPY daily
+    make_proxy("QQQ", "PSQ_PROXY", -1.0)  # -1x QQQ daily
+    make_mix("SH", "SH_PROXY", "SH_MIX")
+    make_mix("PSQ", "PSQ_PROXY", "PSQ_MIX")
+
+    # -------------------------
+    # ✅ Cash-like T-bills mixes
+    # - Use SHY as a simple pre-listing proxy (close enough for "cash-like" role)
+    # -------------------------
+    make_proxy("SHY", "BIL_PROXY", 1.0)
+    make_proxy("SHY", "SGOV_PROXY", 1.0)
+    make_mix("BIL", "BIL_PROXY", "BIL_MIX")
+    make_mix("SGOV", "SGOV_PROXY", "SGOV_MIX")
+
     # Align by base tickers existence (keeps your config clean)
+    # NOTE: Do NOT include late-listing assets here; base_tickers should be stable core tickers.
     base_cols = [c for c in base_tickers if c in px.columns]
     px = px.dropna(subset=base_cols, how="any")
 
