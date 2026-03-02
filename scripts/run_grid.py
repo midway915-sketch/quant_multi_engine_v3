@@ -7,7 +7,7 @@ import math
 import os
 import time
 from itertools import product
-from typing import Any, Dict, List, Tuple
+from typing import Any, List, Tuple
 
 import pandas as pd
 import yaml
@@ -32,9 +32,7 @@ def deep_set(d: dict, key_path: str, value: Any) -> None:
 
 
 def deep_merge(base: dict, overlay: dict) -> dict:
-    """
-    Recursively merge overlay onto base (non-mutating).
-    """
+    """Recursively merge overlay onto base (non-mutating)."""
     out = dict(base)
     for k, v in overlay.items():
         if k in out and isinstance(out[k], dict) and isinstance(v, dict):
@@ -48,16 +46,7 @@ def make_param_sets(grid: dict) -> List[dict]:
     """
     grid yaml is a nested dict where leaves are lists (scan values).
     Create list of param dicts (nested) corresponding to cartesian product.
-
-    Example:
-      grid:
-        state:
-          ma_days: [200,250]
-        allocator:
-          bull:
-            trend: [0.7,0.8]
     """
-    # flatten dot-path -> list(values)
     flat: List[Tuple[str, List[Any]]] = []
 
     def walk(node: Any, prefix: str = ""):
@@ -66,7 +55,6 @@ def make_param_sets(grid: dict) -> List[dict]:
                 p = f"{prefix}.{k}" if prefix else k
                 walk(v, p)
         else:
-            # leaf: must be list for grid scan; allow scalar as single choice
             if isinstance(node, list):
                 flat.append((prefix, node))
             else:
@@ -77,7 +65,7 @@ def make_param_sets(grid: dict) -> List[dict]:
     keys = [k for k, _ in flat]
     values_lists = [vals for _, vals in flat]
 
-    param_sets = []
+    param_sets: List[dict] = []
     for combo in product(*values_lists):
         p: dict = {}
         for k, v in zip(keys, combo):
@@ -88,7 +76,6 @@ def make_param_sets(grid: dict) -> List[dict]:
 
 def short_param_id(param_dict: dict) -> str:
     s = json.dumps(param_dict, sort_keys=True, separators=(",", ":"))
-    # short deterministic id (10 hex)
     import hashlib
     return hashlib.sha1(s.encode("utf-8")).hexdigest()[:10]
 
@@ -116,9 +103,10 @@ def main():
     with open(args.grid, "r", encoding="utf-8") as f:
         grid_cfg = yaml.safe_load(f)
 
-    # grid_cfg is the scan space; param_sets are nested dict overlays
     param_sets = make_param_sets(grid_cfg)
     n = len(param_sets)
+    if n <= 0:
+        raise ValueError("Grid produced 0 param sets. Check grid.yml format (leaves should be lists/scalars).")
 
     # --- download prices + build proxies (once) ---
     prices = download_prices_and_build_proxies(base_cfg)
@@ -126,24 +114,27 @@ def main():
     prices.to_csv(prices_path, index=True)
 
     # --- iterate grid ---
-    best = None
+    best_cagr = None
     best_row = None
+    best_params = None
     rows = []
 
     t0 = time.time()
+    progress_every = max(1, n // 20)  # ~5% 단위
     for i, overlay in enumerate(param_sets, 1):
         cfg = deep_merge(base_cfg, overlay)
 
-        # ✅ guard: if any allocator values are still lists, the grid wasn't expanded properly
-        # (this should not happen with make_param_sets)
-        for bucket in ["bull", "bear", "crash"]:
-            for k in ["trend", "meanrev", "defensive"]:
-                v = cfg["allocator"][bucket][k]
-                if isinstance(v, list):
-                    raise ValueError(
-                        f"Allocator value is list after merge: allocator.{bucket}.{k}={v}. "
-                        f"Grid expansion failed; ensure scan values are only in grid.yml and expanded by run_grid."
-                    )
+        # safety guard: allocator 값이 list로 남아있으면 grid 확장 실패
+        if "allocator" in cfg:
+            for bucket in ("bull", "bear", "crash"):
+                if bucket in cfg["allocator"]:
+                    for k in ("trend", "meanrev", "defensive"):
+                        v = cfg["allocator"][bucket].get(k)
+                        if isinstance(v, list):
+                            raise ValueError(
+                                f"Allocator value is list after merge: allocator.{bucket}.{k}={v}. "
+                                f"Grid expansion failed; ensure scan values are only in grid.yml and expanded by run_grid."
+                            )
 
         eq, choice_log, picks, holdings_daily, holdings_weekly = run_meta_portfolio(prices, cfg)
         met = compute_metrics(eq)
@@ -152,7 +143,10 @@ def main():
         end = eq.index.max()
         start_10y = end - pd.DateOffset(years=10)
         eq_10y = eq.loc[eq.index >= start_10y]
-        met_10y = compute_metrics(eq_10y) if len(eq_10y) > 10 else {"seed_multiple": math.nan, "cagr": math.nan, "mdd": math.nan}
+        if len(eq_10y) > 10:
+            met_10y = compute_metrics(eq_10y)
+        else:
+            met_10y = {"seed_multiple": math.nan, "cagr": math.nan, "mdd": math.nan}
 
         pid = short_param_id(overlay)
 
@@ -173,13 +167,13 @@ def main():
 
         rows.append(row)
 
-        # best by CAGR (you can change to 10y CAGR etc.)
-        if (best is None) or (row["cagr"] > best):
-            best = row["cagr"]
+        # best by CAGR
+        if (best_cagr is None) or (row["cagr"] > best_cagr):
+            best_cagr = row["cagr"]
             best_row = row
             best_params = overlay
 
-            # write best-run artifacts continuously (so even if action stops you still have them)
+            # write best-run artifacts continuously
             eq.to_csv(os.path.join(out_dir, "equity_curve.csv"), index=True)
             pd.DataFrame(choice_log).to_csv(os.path.join(out_dir, "engine_choice_log.csv"), index=False)
             picks.to_csv(os.path.join(out_dir, "picks_top2_weekly.csv"), index=False)
@@ -188,12 +182,15 @@ def main():
             with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
                 json.dump({"all": met, "recent_10y": met_10y}, f, indent=2)
 
-        # progress
+        # progress + ETA (keep)
         elapsed = time.time() - t0
-        per = elapsed / i
-        eta = per * (n - i)
-        if i == 1 or i % max(1, n // 20) == 0 or i == n:
-            print(f"[PROGRESS] {i}/{n} iter={per:.2f}s elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m best_CAGR={(best*100):.2f}%")
+        per_iter = elapsed / i
+        eta = per_iter * (n - i)
+        if i == 1 or i % progress_every == 0 or i == n:
+            print(
+                f"[PROGRESS] {i}/{n} iter={per_iter:.2f}s elapsed={elapsed/60:.1f}m "
+                f"eta={eta/60:.1f}m best_CAGR={(best_cagr*100):.2f}%"
+            )
 
     # --- write summary + best_params ---
     summary = pd.DataFrame(rows).sort_values("cagr", ascending=False)
@@ -201,11 +198,14 @@ def main():
     summary.to_csv(summary_path, index=False)
     print(f"[DONE] summary -> {summary_path}")
 
+    if best_row is None or best_params is None:
+        raise RuntimeError("No best result selected; unexpected state. Check run_meta_portfolio/compute_metrics outputs.")
+
     best_params_path = os.path.join(out_dir, "best_params.json")
     with open(best_params_path, "w", encoding="utf-8") as f:
         json.dump({"param_id": best_row["param_id"], "overlay": best_params}, f, indent=2)
     print(f"[DONE] best_params -> {best_params_path}")
-    print(f"[DONE] best_CAGR={(best*100):.2f}% out={out_dir}")
+    print(f"[DONE] best_CAGR={(best_cagr*100):.2f}% out={out_dir}")
 
 
 if __name__ == "__main__":
