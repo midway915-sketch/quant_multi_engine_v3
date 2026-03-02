@@ -16,7 +16,7 @@ crash:
   threshold: [-0.10]
 
 risk_off:
-  mode: ["SGOV_100", "BIL_100", "SHY_100"]
+  mode: ["SGOV_100", "SHY_100"]
 
 trend_engine:
   mom_lookback_days: [126, 168]
