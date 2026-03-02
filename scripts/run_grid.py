@@ -140,4 +140,117 @@ def main():
             {
                 "shard_index": args.shard_index,
                 "shard_count": args.shard_count,
-                "total_param_sets
+                "total_param_sets": n_all,
+                "this_shard_param_sets": n,
+            },
+            f,
+            indent=2,
+            ensure_ascii=False,
+        )
+
+    # download prices once per shard
+    prices = download_prices_and_build_proxies(base_cfg)
+    prices.to_csv(os.path.join(out_dir, "prices.csv"), index=True)
+
+    best = None
+    best_row = None
+    best_params = None
+    rows: List[dict] = []
+
+    t0 = time.time()
+    progress_every = max(1, n // 20)
+
+    for i, overlay in enumerate(param_sets, 1):
+        cfg = deep_merge(base_cfg, overlay)
+
+        # safety guard: allocator 값이 list로 남아있으면 grid 확장 실패
+        if "allocator" in cfg:
+            for bucket in ("bull", "bear", "crash"):
+                if bucket in cfg["allocator"]:
+                    for k in ("trend", "meanrev", "defensive"):
+                        v = cfg["allocator"][bucket].get(k)
+                        if isinstance(v, list):
+                            raise ValueError(
+                                f"Allocator value is list after merge: allocator.{bucket}.{k}={v}. "
+                                f"Grid expansion failed."
+                            )
+
+        eq, choice_log, picks, holdings_daily, holdings_weekly = run_meta_portfolio(prices, cfg)
+        met = compute_metrics(eq)
+
+        # recent 10y metrics
+        end = eq.index.max()
+        start_10y = end - pd.DateOffset(years=10)
+        eq_10y = eq.loc[eq.index >= start_10y]
+        if len(eq_10y) > 10:
+            met_10y = compute_metrics(eq_10y)
+        else:
+            met_10y = {"seed_multiple": math.nan, "cagr": math.nan, "mdd": math.nan}
+
+        pid = short_param_id(overlay)
+
+        # ---- summary row ----
+        row = {
+            "param_id": pid,
+            "seed_multiple": float(met["seed_multiple"]),
+            "cagr": float(met["cagr"]),
+            "mdd": float(met["mdd"]),
+            "seed_multiple_10y": float(met_10y["seed_multiple"]),
+            "cagr_10y": float(met_10y["cagr"]),
+            "mdd_10y": float(met_10y["mdd"]),
+        }
+        row["cagr_pct"] = row["cagr"] * 100.0
+        row["mdd_pct"] = row["mdd"] * 100.0
+        row["cagr_10y_pct"] = row["cagr_10y"] * 100.0
+        row["mdd_10y_pct"] = row["mdd_10y"] * 100.0
+
+        # include params in summary.csv
+        row["params_json"] = json.dumps(overlay, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+
+        flat_params = flatten_dict(overlay)
+        for k, v in flat_params.items():
+            row[f"params__{k}"] = v
+
+        rows.append(row)
+
+        # best by CAGR (per shard)
+        if (best is None) or (row["cagr"] > best):
+            best = row["cagr"]
+            best_row = row
+            best_params = overlay
+
+            eq.to_csv(os.path.join(out_dir, "equity_curve.csv"), index=True)
+            pd.DataFrame(choice_log).to_csv(os.path.join(out_dir, "engine_choice_log.csv"), index=False)
+            picks.to_csv(os.path.join(out_dir, "picks_top2_weekly.csv"), index=False)
+            holdings_daily.to_csv(os.path.join(out_dir, "holdings_daily.csv"), index=False)
+            holdings_weekly.to_csv(os.path.join(out_dir, "holdings_weekly.csv"), index=False)
+            with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
+                json.dump({"all": met, "recent_10y": met_10y}, f, indent=2, ensure_ascii=False)
+
+        # progress + ETA (keep)
+        elapsed = time.time() - t0
+        per = elapsed / i
+        eta = per * (n - i)
+        if i == 1 or i % progress_every == 0 or i == n:
+            print(
+                f"[PROGRESS] shard={args.shard_index}/{args.shard_count} {i}/{n} "
+                f"iter={per:.2f}s elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m best_CAGR={(best*100):.2f}%"
+            )
+
+    summary = pd.DataFrame(rows).sort_values("cagr", ascending=False)
+    summary_path = os.path.join(out_dir, "summary.csv")
+    summary.to_csv(summary_path, index=False)
+    print(f"[DONE] shard {args.shard_index}: summary -> {summary_path}")
+
+    if best_row is None or best_params is None:
+        raise RuntimeError("No best result selected; unexpected state.")
+
+    best_params_path = os.path.join(out_dir, "best_params.json")
+    with open(best_params_path, "w", encoding="utf-8") as f:
+        json.dump({"param_id": best_row["param_id"], "overlay": best_params}, f, indent=2, ensure_ascii=False)
+    print(f"[DONE] shard {args.shard_index}: best_params -> {best_params_path}")
+    print(f"[DONE] shard {args.shard_index}: best_CAGR={(best*100):.2f}% out={out_dir}")
+
+
+if __name__ == "__main__":
+    main()
