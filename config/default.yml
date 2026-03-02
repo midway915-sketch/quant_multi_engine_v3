@@ -1,7 +1,7 @@
 data:
   tickers: ["SPY","QQQ","SOXX","SHY","GLD"]
   start: "2000-01-01"
-  end: "2025-12-31"
+  end: "2026-02-27"
 
 portfolio:
   rebalance: "weekly"
