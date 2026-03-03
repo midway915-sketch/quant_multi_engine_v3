@@ -176,10 +176,10 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     
     elif reb_mode == "monthly":
         # 월말 기준: 해당 월의 마지막 거래일(데이터에 있는 마지막 날짜)
-        reb_dates = prices.resample("M").last().index
+        reb_dates = prices.resample("ME").last().index
         # 안전하게: 실제 거래일 index에 있는 날짜만 남김
         reb_dates = prices.index[prices.index.isin(reb_dates)]
-    
+        
     else:
         # unknown -> default weekly
         reb_dates = fridays
