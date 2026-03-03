@@ -1,0 +1,50 @@
+name: run-rolling-oos-stress-costs
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: "Stress config yml"
+        required: true
+        default: "config/default_stress_costs.yml"
+      out_dir:
+        description: "Output directory"
+        required: true
+        default: "out/rolling_oos_stress_costs"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run rolling OOS (stress costs only)
+        run: |
+          mkdir -p "${{ inputs.out_dir }}"
+          python -m scripts.run_rolling_oos_fixed \
+            --config "${{ inputs.config_path }}" \
+            --out "${{ inputs.out_dir }}"
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: rolling-oos-stress-costs-results
+          if-no-files-found: warn
+          path: |
+            ${{ inputs.out_dir }}/
