@@ -169,13 +169,20 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
 
     if reb_mode == "weekly":
         reb_dates = fridays
+    
     elif reb_mode == "biweekly":
         # take every 2nd Friday in chronological order (deterministic)
         reb_dates = fridays[::2]
+    
+    elif reb_mode == "monthly":
+        # 월말 기준: 해당 월의 마지막 거래일(데이터에 있는 마지막 날짜)
+        reb_dates = prices.resample("M").last().index
+        # 안전하게: 실제 거래일 index에 있는 날짜만 남김
+        reb_dates = prices.index[prices.index.isin(reb_dates)]
+    
     else:
         # unknown -> default weekly
         reb_dates = fridays
-
     # Weekly closes for weekly return reporting (still weekly for reporting)
     wclose = _weekly_close(prices)
 
