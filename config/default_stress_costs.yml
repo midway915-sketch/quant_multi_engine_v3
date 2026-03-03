@@ -1,14 +1,14 @@
-# config/default_stress_costs.yml
-# NOTE: config/default.yml과 동일 + costs만 스트레스(0.20%/0.20%)로 상향
+# config/default_stress_biweekly.yml
+# 기존 default_stress_costs.yml 복사 + 리밸런스만 biweekly
 
 data:
   tickers: ["SPY","QQQ","SOXX","SHY","GLD"]
   start: "2000-01-01"
 
 portfolio:
-  rebalance: "weekly"
-  when: "week_end"      # W-FRI
-  entry: "next_close"   # signals at t used from t+1
+  rebalance: "biweekly"   # 🔥 변경
+  when: "week_end"
+  entry: "next_close"
 
 state:
   base_ticker: "SPY"
@@ -39,14 +39,13 @@ meanrev_engine:
   leverage: 1.5
 
 defensive_engine:
-  mode: "SGOV"  # "SHY" or "CASH"
+  mode: "SGOV"
 
 allocator:
   bull:   {trend: 0.75, meanrev: 0.00, defensive: 0.25}
   bear:   {trend: 0.00, meanrev: 0.00, defensive: 1.00}
   crash:  {trend: 0.00, meanrev: 0.00, defensive: 1.00}
 
-# ✅ stress: 비용 0.20%/0.20%
 costs:
   buy: 0.0020
   sell: 0.0020
