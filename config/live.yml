@@ -1,14 +1,19 @@
-mode: "dry_run"   # dry_run | paper | live
+mode: "dry_run"   # dry_run | live (live는 주문모듈 붙인 뒤)
 
 timezone: "Asia/Seoul"
 
 schedule:
-  rebalance: "monthly"   # monthly 고정
-  when: "first_trading_day_open"  # first_trading_day_open | last_trading_day_close
+  rebalance: "monthly"
+  # 월말 마지막 거래일 "장마감(MOC)" 실행이 목표면 last_trading_day_close
+  when: "last_trading_day_close"   # last_trading_day_close | first_trading_day_open
 
 universe:
   candidates: ["QQQ", "SPY", "SOXX"]
   defensive: "SGOV"
+  trade_map:
+    QQQ: "TQQQ"
+    SPY: "UPRO"
+    SOXX: "SOXL"
 
 strategy:
   base_ticker: "SPY"
@@ -23,13 +28,10 @@ strategy:
     mom_lookback_days: 126
     top_n: 1
 
-  meanrev_engine:
-    enabled: false   # 운영에서는 mix 없애자 -> 일단 false
-
 allocator:
   bull:
-    trend: 1.0
-    defensive: 0.0
+    trend: 0.75
+    defensive: 0.25
   bear:
     trend: 0.0
     defensive: 1.0
@@ -38,12 +40,27 @@ allocator:
     defensive: 1.0
 
 execution:
-  # 미국주식 실전 주문 방식(일단 방향만)
-  rebalance_order: "MOC"   # MOC 권장(너 말대로 LOC보다 단순)
-  price_source: "minute"   # 나중에 체결/호가 붙이면 바뀜
+  order_type: "MOC"        # KIS 미국주식: MOC=33
+  # MOC로 보낼 거면 "장마감 직전(예: 5~10분 전)"에 스케줄링해야 함
+  # 스케줄링은 cron/systemd에서 처리 (코드는 날짜 판단만)
+
+data:
+  # 라이브는 MIX 없이 "실티커"만 다운로드
+  tickers:
+    - QQQ
+    - SPY
+    - SOXX
+    - TQQQ
+    - UPRO
+    - SOXL
+    - SGOV
 
 notify:
   telegram:
     enabled: true
     bot_token_env: "TG_BOT_TOKEN"
     chat_id_env: "TG_CHAT_ID"
+
+paths:
+  state_dir: "out/live_state"
+  out_dir: "out/live_runs"
