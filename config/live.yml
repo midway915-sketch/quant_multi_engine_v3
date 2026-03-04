@@ -1,0 +1,49 @@
+mode: "dry_run"   # dry_run | paper | live
+
+timezone: "Asia/Seoul"
+
+schedule:
+  rebalance: "monthly"   # monthly 고정
+  when: "first_trading_day_open"  # first_trading_day_open | last_trading_day_close
+
+universe:
+  candidates: ["QQQ", "SPY", "SOXX"]
+  defensive: "SGOV"
+
+strategy:
+  base_ticker: "SPY"
+  ma_days: 150
+  min_hold_days: 11
+
+  crash:
+    lookback_days: 12
+    threshold: -0.10
+
+  trend_engine:
+    mom_lookback_days: 126
+    top_n: 1
+
+  meanrev_engine:
+    enabled: false   # 운영에서는 mix 없애자 -> 일단 false
+
+allocator:
+  bull:
+    trend: 1.0
+    defensive: 0.0
+  bear:
+    trend: 0.0
+    defensive: 1.0
+  crash:
+    trend: 0.0
+    defensive: 1.0
+
+execution:
+  # 미국주식 실전 주문 방식(일단 방향만)
+  rebalance_order: "MOC"   # MOC 권장(너 말대로 LOC보다 단순)
+  price_source: "minute"   # 나중에 체결/호가 붙이면 바뀜
+
+notify:
+  telegram:
+    enabled: true
+    bot_token_env: "TG_BOT_TOKEN"
+    chat_id_env: "TG_CHAT_ID"
