@@ -130,3 +130,13 @@ def download_prices_and_build_proxies(cfg) -> pd.DataFrame:
         raise ValueError("Price data empty after alignment.")
 
     return px
+
+
+def download_prices(cfg) -> pd.DataFrame:
+    """
+    ✅ Compatibility wrapper.
+    Existing scripts expect:
+        from src.core.data import download_prices
+    so we provide it and reuse your original implementation.
+    """
+    return download_prices_and_build_proxies(cfg)
