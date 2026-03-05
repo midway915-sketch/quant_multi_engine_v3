@@ -1,4 +1,6 @@
-# config/grid_merge4_soxx_gate_ablation.yml
+# config/grid_merge4_soxx_gate_on_6400.yml
+# merge4 고정 + soxx_gate enabled=true 고정, 정확히 6400 combos
+# combos = mode(2) * mom_lb(10) * mom_thr(10) * ma_days(32) = 6400
 
 data:
   prices_start: ["2000-01-01"]
@@ -22,13 +24,17 @@ bear_fast:
   lookback_days: [3]
   threshold: [-0.045]
 
-# ✅ NEW: SOXX 조건부 허용
 soxx_gate:
-  enabled: [false, true]
+  enabled: [true]
   mode: ["mom", "ma"]
-  mom_lookback_days: [10, 20, 30]
-  mom_threshold: [0.0]   # 20일 모멘텀 > 0이면 허용
-  ma_days: [40, 50, 60]          # mode=ma로 바꿀 때만 사용
+
+  # mode=mom 에서 사용
+  mom_lookback_days: [5, 10, 12, 15, 20, 30, 42, 63, 84, 126]
+  mom_threshold: [0.00, 0.01, 0.02, 0.03, 0.04, 0.05, 0.06, 0.08, 0.10, 0.12]
+
+  # mode=ma 에서 사용 (32개)
+  ma_days: [10, 12, 15, 18, 20, 25, 30, 35, 40, 45, 50, 55, 60, 70, 80, 90,
+            100, 110, 120, 130, 150, 160, 180, 200, 220, 250, 280, 300, 330, 360, 420, 500]
 
 risk_off:
   mode: ["SGOV_100"]
