@@ -88,6 +88,28 @@ def flatten_dict(d: Any, prefix: str = "") -> Dict[str, Any]:
     return out
 
 
+def _year_return_and_mdd(eq: pd.Series, year: int) -> Dict[str, float]:
+    """
+    Compute calendar-year return and within-year MDD based on equity series.
+    Returns NaN if year not present.
+    """
+    if eq is None or eq.empty:
+        return {"ret": math.nan, "mdd": math.nan}
+
+    seg = eq.loc[(eq.index >= pd.Timestamp(f"{year}-01-01")) & (eq.index <= pd.Timestamp(f"{year}-12-31"))]
+    if seg.empty or len(seg) < 10:
+        return {"ret": math.nan, "mdd": math.nan}
+
+    base = float(seg.iloc[0])
+    last = float(seg.iloc[-1])
+    if base <= 0 or pd.isna(base) or pd.isna(last):
+        return {"ret": math.nan, "mdd": math.nan}
+
+    seg_rebased = seg / base
+    met = compute_metrics(seg_rebased)
+    return {"ret": float(last / base - 1.0), "mdd": float(met["mdd"])}
+
+
 def parse_args():
     ap = argparse.ArgumentParser()
     ap.add_argument("--config", required=True, help="config/default.yml")
@@ -96,8 +118,6 @@ def parse_args():
 
     ap.add_argument("--shard-index", type=int, default=0, help="0-based shard index")
     ap.add_argument("--shard-count", type=int, default=1, help="number of shards (>=1)")
-
-    # reuse prebuilt prices.csv to avoid per-shard downloads
     ap.add_argument("--prices-csv", default="", help="Path to prebuilt prices.csv (if set, skip download)")
     return ap.parse_args()
 
@@ -144,8 +164,7 @@ def main():
             ensure_ascii=False,
         )
 
-    # prices: load from csv if provided, else download
-        # ✅ prices: load from csv if provided, else download
+    # prices
     if args.prices_csv:
         if not os.path.exists(args.prices_csv):
             raise FileNotFoundError(f"--prices-csv not found: {args.prices_csv}")
@@ -153,31 +172,20 @@ def main():
     else:
         prices = download_prices_and_build_proxies(base_cfg)
 
-    # ✅ enforce date range (optional): data.start / data.end
-    start = (base_cfg.get("data", {}) or {}).get("start")
-    end = (base_cfg.get("data", {}) or {}).get("end")
-    if start:
-        prices = prices.loc[prices.index >= pd.Timestamp(start)]
-    if end:
-        prices = prices.loc[prices.index <= pd.Timestamp(end)]
-
-    # always persist prices used by this shard (debug/repro)
     prices.to_csv(os.path.join(out_dir, "prices.csv"), index=True)
+
     best = None
     best_row = None
     best_params = None
     rows: List[dict] = []
 
     t0 = time.time()
-
-    # ✅ 더 자주: 대략 1%마다 + 최소 60초마다 한 번
-    progress_every = max(1, n // 100)
-    last_print_ts = 0.0
-    print_interval_sec = 60.0
+    progress_every = max(1, n // 50)  # ✅ 더 자주 진행률
 
     for i, overlay in enumerate(param_sets, 1):
         cfg = deep_merge(base_cfg, overlay)
 
+        # guard
         if "allocator" in cfg:
             for bucket in ("bull", "bear", "crash"):
                 if bucket in cfg["allocator"]:
@@ -191,6 +199,7 @@ def main():
         eq, choice_log, picks, holdings_daily, holdings_weekly = run_meta_portfolio(prices, cfg)
         met = compute_metrics(eq)
 
+        # recent 10y metrics
         end = eq.index.max()
         start_10y = end - pd.DateOffset(years=10)
         eq_10y = eq.loc[eq.index >= start_10y]
@@ -198,6 +207,11 @@ def main():
             met_10y = compute_metrics(eq_10y)
         else:
             met_10y = {"seed_multiple": math.nan, "cagr": math.nan, "mdd": math.nan}
+
+        # ✅ pinset target years
+        y2011 = _year_return_and_mdd(eq, 2011)
+        y2022 = _year_return_and_mdd(eq, 2022)
+        y2008 = _year_return_and_mdd(eq, 2008)
 
         pid = short_param_id(overlay)
 
@@ -209,12 +223,29 @@ def main():
             "seed_multiple_10y": float(met_10y["seed_multiple"]),
             "cagr_10y": float(met_10y["cagr"]),
             "mdd_10y": float(met_10y["mdd"]),
+            # pinset years
+            "ret_2011": float(y2011["ret"]),
+            "mdd_2011": float(y2011["mdd"]),
+            "ret_2022": float(y2022["ret"]),
+            "mdd_2022": float(y2022["mdd"]),
+            "ret_2008": float(y2008["ret"]),
+            "mdd_2008": float(y2008["mdd"]),
         }
+
+        # pct columns
         row["cagr_pct"] = row["cagr"] * 100.0
         row["mdd_pct"] = row["mdd"] * 100.0
         row["cagr_10y_pct"] = row["cagr_10y"] * 100.0
         row["mdd_10y_pct"] = row["mdd_10y"] * 100.0
 
+        row["ret_2011_pct"] = row["ret_2011"] * 100.0
+        row["mdd_2011_pct"] = row["mdd_2011"] * 100.0
+        row["ret_2022_pct"] = row["ret_2022"] * 100.0
+        row["mdd_2022_pct"] = row["mdd_2022"] * 100.0
+        row["ret_2008_pct"] = row["ret_2008"] * 100.0
+        row["mdd_2008_pct"] = row["mdd_2008"] * 100.0
+
+        # include params
         row["params_json"] = json.dumps(overlay, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
         flat_params = flatten_dict(overlay)
         for k, v in flat_params.items():
@@ -222,8 +253,13 @@ def main():
 
         rows.append(row)
 
-        if (best is None) or (row["cagr"] > best):
-            best = row["cagr"]
+        # best by robust objective (pinset-aware):
+        # maximize 10y CAGR while penalizing 2011/2022 drawdowns
+        # score = cagr_10y - 0.25*abs(mdd_2011) - 0.25*abs(mdd_2022)
+        score = row["cagr_10y"] - 0.25 * abs(row["mdd_2011"]) - 0.25 * abs(row["mdd_2022"])
+
+        if (best is None) or (score > best):
+            best = score
             best_row = row
             best_params = overlay
 
@@ -233,24 +269,32 @@ def main():
             holdings_daily.to_csv(os.path.join(out_dir, "holdings_daily.csv"), index=False)
             holdings_weekly.to_csv(os.path.join(out_dir, "holdings_weekly.csv"), index=False)
             with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
-                json.dump({"all": met, "recent_10y": met_10y}, f, indent=2, ensure_ascii=False)
+                json.dump(
+                    {
+                        "all": met,
+                        "recent_10y": met_10y,
+                        "year_2011": y2011,
+                        "year_2022": y2022,
+                        "year_2008": y2008,
+                        "best_score": best,
+                    },
+                    f,
+                    indent=2,
+                    ensure_ascii=False,
+                )
 
-        # progress + ETA (more frequent)
-        now = time.time()
-        elapsed = now - t0
+        # progress
+        elapsed = time.time() - t0
         per = elapsed / i
         eta = per * (n - i)
-
-        should_print = (i == 1) or (i == n) or (i % progress_every == 0) or ((now - last_print_ts) >= print_interval_sec)
-        if should_print:
-            last_print_ts = now
-            best_cagr_pct = (best * 100.0) if best is not None else float("nan")
+        if i == 1 or i % progress_every == 0 or i == n:
             print(
                 f"[PROGRESS] shard={args.shard_index}/{args.shard_count} {i}/{n} "
-                f"iter={per:.2f}s elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m best_CAGR={best_cagr_pct:.2f}%"
+                f"iter={per:.2f}s elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m "
+                f"best_score={best:.4f}"
             )
 
-    summary = pd.DataFrame(rows).sort_values("cagr", ascending=False)
+    summary = pd.DataFrame(rows).sort_values("cagr_10y", ascending=False)
     summary_path = os.path.join(out_dir, "summary.csv")
     summary.to_csv(summary_path, index=False)
     print(f"[DONE] shard {args.shard_index}: summary -> {summary_path}")
@@ -260,9 +304,8 @@ def main():
 
     best_params_path = os.path.join(out_dir, "best_params.json")
     with open(best_params_path, "w", encoding="utf-8") as f:
-        json.dump({"param_id": best_row["param_id"], "overlay": best_params}, f, indent=2, ensure_ascii=False)
+        json.dump({"param_id": best_row["param_id"], "overlay": best_params, "best_score": best}, f, indent=2, ensure_ascii=False)
     print(f"[DONE] shard {args.shard_index}: best_params -> {best_params_path}")
-    print(f"[DONE] shard {args.shard_index}: best_CAGR={(best*100):.2f}% out={out_dir}")
 
 
 if __name__ == "__main__":
