@@ -8,11 +8,12 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     Priority: CRASH > BULL > BEAR
     Look-ahead prevention: signals use shift(1)
 
-    merge4-core only:
-      - crash.main (lb,thr)
-      - crash.fast (short lb,thr)  [optional]
+    Includes:
+      - crash.main (lb, thr)
+      - crash.fast (optional): short lookback crash trigger
       - min_hold_days hysteresis (legacy)
-      - bear_fast (short lb,thr) applied AFTER hold filter (can force immediate exit)
+      - bear_fast (optional): short lookback BEAR trigger
+        IMPORTANT: bear_fast applied AFTER min_hold so it can force immediate exit
     """
     debug = bool(cfg.get("debug", {}).get("state", False))
 
@@ -30,8 +31,8 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     bull_raw = (p > ma)
     bull = bull_raw.shift(1).fillna(False)
 
-    # ---- CRASH (main + optional fast) ----
-    crash_cfg = cfg.get("crash", {}) or {}
+    # ---- CRASH (main + fast) ----
+    crash_cfg = (cfg.get("crash", {}) or {})
     crash_enabled = bool(crash_cfg.get("enabled", True))
     crash = pd.Series(False, index=prices.index)
 
@@ -64,13 +65,13 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         br = p.pct_change(blb).shift(1)
         bear_fast = (br <= bthr).fillna(False)
 
-        # force BULL off
+        # force BULL off when bear_fast triggers
         bull = bull & (~bear_fast)
 
     # ---- STATE ASSIGNMENT ----
     state = pd.Series("BEAR", index=prices.index)
     state.loc[bull] = "BULL"
-    state.loc[crash] = "CRASH"
+    state.loc[crash] = "CRASH"  # override
 
     out = pd.DataFrame(
         {
@@ -83,12 +84,13 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     )
 
     if debug:
-        vc = out["state"].value_counts(dropna=False).to_dict()
-        print(f"[STATE-DEBUG] state_counts: {vc}")
+        print("[STATE-DEBUG] state_counts:", out["state"].value_counts(dropna=False).to_dict())
         if crash_enabled:
             print(f"[STATE-DEBUG] crash_true={int(out['crash_flag'].sum())}")
+        if fast_enabled:
+            print(f"[STATE-DEBUG] crash_fast: lb={fast.get('lookback_days')} thr={fast.get('threshold')}")
         if bear_fast_enabled:
-            print(f"[STATE-DEBUG] bear_fast_true={int(bear_fast.sum())}")
+            print(f"[STATE-DEBUG] bear_fast_true={int(bear_fast.sum())} lb={bear_fast_cfg.get('lookback_days')} thr={bear_fast_cfg.get('threshold')}")
 
     return out
 
