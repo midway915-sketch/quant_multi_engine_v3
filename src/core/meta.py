@@ -69,56 +69,25 @@ def _normalize_weights(h: dict) -> dict:
     return {k: float(v / s) for k, v in h.items()}
 
 
-def _turnover_cost_frac(
-    w_prev: dict,
-    w_new: dict,
-    buy_cost: float,
-    sell_cost: float,
-) -> float:
-    """
-    Cost fraction for transitioning w_prev -> w_new.
-    Apply as: equity *= (1 - cost_frac)
-    """
-    if buy_cost <= 0 and sell_cost <= 0:
-        return 0.0
-
-    keys = set(w_prev.keys()) | set(w_new.keys())
-    buy_turn = 0.0
-    sell_turn = 0.0
-
-    for k in keys:
-        prev = float(w_prev.get(k, 0.0))
-        new = float(w_new.get(k, 0.0))
-        d = new - prev
-        if d > 0:
-            buy_turn += d
-        elif d < 0:
-            sell_turn += (-d)
-
-    cost_frac = buy_turn * float(buy_cost) + sell_turn * float(sell_cost)
-    return float(max(cost_frac, 0.0))
-
-
 def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     """
-    Existing structure:
-      - State (BULL/BEAR/CRASH) computed DAILY and affects weights immediately
-      - Trend picks updated ONLY on rebalance dates (weekly/biweekly/monthly/quarterly)
-      - Holdings apply next trading day (lookahead-free intent)
-      - Costs applied ONLY on rebalance dates via turnover fraction
+    Lookahead-free:
+      - Today's return uses yesterday's confirmed holdings
+      - Signals/picks computed at date dt are applied starting next trading day
+
+    + Pinset: asset_fast (Top1 자산 자체 급락시 risk_off 100% 강제)
 
     Returns:
-      equity, engine_choice_log, picks_df, holdings_daily, holdings_weekly
+      equity: pd.Series
+      engine_choice_log: list[dict]
+      picks_top2_weekly: pd.DataFrame
+      holdings_daily: pd.DataFrame  (date,ticker,weight,state)
+      holdings_weekly: pd.DataFrame (week_end,ticker,avg_weight,week_ret,contrib)
     """
     prices = prices.copy()
     returns = prices.pct_change().fillna(0.0)
 
     state_df = compute_state_flags(prices, cfg)
-
-    # ---- Costs ----
-    costs_cfg = cfg.get("costs", {}) or {}
-    buy_cost = float(costs_cfg.get("buy", 0.0))
-    sell_cost = float(costs_cfg.get("sell", 0.0))
 
     # ---- Portfolio config ----
     port_cfg = cfg.get("portfolio", {}) or {}
@@ -151,6 +120,15 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     # ---- Allocator / defensive ----
     alloc = cfg["allocator"]
     risk_off_mode = (cfg.get("risk_off", {}) or {}).get("mode", "SHY_100")
+    df_w = _risk_off_weights(risk_off_mode)
+    df_w = _normalize_weights(df_w) if df_w else {"SHY": 1.0}
+
+    # ---- Asset-fast pinset config ----
+    af_cfg = (cfg.get("asset_fast", {}) or {})
+    af_enabled = bool(af_cfg.get("enabled", False))
+    af_lb = int(af_cfg.get("lookback_days", 5))
+    af_thr = float(af_cfg.get("threshold", -0.10))
+    af_scope = str(af_cfg.get("scope", "trend_top1")).lower().strip()  # "trend_top1" only
 
     # ---- Rebalance schedule ----
     week_end = _week_end_index(prices.index)
@@ -164,15 +142,16 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     elif reb_mode == "biweekly":
         reb_dates = fridays[::2]
     elif reb_mode == "monthly":
-        reb_dates = prices.resample("ME").last().index
-        reb_dates = prices.index[prices.index.isin(reb_dates)]
+        # month-end last trading day (use ME then map to actual index)
+        me = prices.resample("ME").last().index
+        reb_dates = prices.index[prices.index.isin(me)]
     elif reb_mode == "quarterly":
-        reb_dates = prices.resample("QE").last().index
-        reb_dates = prices.index[prices.index.isin(reb_dates)]
+        qe = prices.resample("QE").last().index
+        reb_dates = prices.index[prices.index.isin(qe)]
     else:
         reb_dates = fridays
 
-    # Weekly closes for weekly return reporting
+    # weekly close (reporting)
     wclose = _weekly_close(prices)
 
     def get_week_ret(ticker_col: str, wk_end: pd.Timestamp) -> float:
@@ -187,18 +166,19 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             return np.nan
         return float(cur / prev - 1.0)
 
-    # Trend picks state
-    current_trend_tradecols = []
+    # --- Trend picks state ---
+    current_trend_tradecols: list[str] = []
     picks_rows = []
 
-    # MeanRev position state (runs daily)
+    # --- MeanRev position state ---
     mr_active = False
     mr_entry_price = None
     mr_days = 0
     mr_trade_col = None
 
-    # Holdings (start parked)
+    # --- Holdings (lookahead-free) ---
     h_cur = {"SHY": 1.0}
+    h_next = h_cur.copy()
 
     equity = 1.0
     curve = []
@@ -210,9 +190,11 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     for i, dt in enumerate(idx):
         st = state_df.loc[dt, "state"]
 
-        # 1) apply today's return using h_cur
+        # 1) APPLY TODAY'S RETURN USING h_cur
         for t, w in h_cur.items():
-            holdings_daily_rows.append({"date": str(dt.date()), "ticker": t, "weight": float(w), "state": st})
+            holdings_daily_rows.append(
+                {"date": str(dt.date()), "ticker": t, "weight": float(w), "state": st}
+            )
 
         daily_ret = 0.0
         for t, w in h_cur.items():
@@ -220,14 +202,17 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                 daily_ret += float(returns.loc[dt, t]) * float(w)
 
         equity *= (1.0 + daily_ret)
+        curve.append(equity)
 
-        # 2) trend picks update only on rebalance dates
-        if dt in reb_dates:
-            m = mom.loc[dt, candidates] if all([c in mom.columns for c in candidates]) else mom.loc[dt].reindex(candidates)
+        # 2) COMPUTE SIGNALS / desired holdings for TOMORROW
+
+        # (a) Trend picks updated ONLY on rebalance dates
+        rebalance_today = bool(dt in reb_dates)
+        if rebalance_today:
+            # robust select
+            m = mom.loc[dt].reindex(candidates)
             ranked = m.dropna().sort_values(ascending=False)
-            sw = (cfg.get("switches", {}) or {})
-            if bool(sw.get("ban_soxx", False)):
-                ranked = ranked.drop(index=[x for x in ranked.index if x == "SOXX"], errors="ignore")
+
             if ranked.empty:
                 top1, top2 = None, None
                 current_trend_tradecols = []
@@ -253,7 +238,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             row["rank2_week_ret"] = get_week_ret(row["rank2_trade"], wk) if row["rank2_trade"] else np.nan
             picks_rows.append(row)
 
-        # 3) meanrev decisions daily (unchanged)
+        # (b) MeanRev decisions (daily)
         mr_price_under = prices[mr_base] if mr_base in prices.columns else None
         if mr_price_under is None or mr_price_under.isna().all():
             mr_active = False
@@ -285,26 +270,28 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                         mr_entry_price = None
                         mr_days = 0
 
-        # 4) build desired holdings DAILY based on today's state
+        # (c) Build desired holdings for TOMORROW
         st_key = st.lower()
         w_tr = float(alloc[st_key]["trend"])
         w_mr = float(alloc[st_key]["meanrev"])
         w_df = float(alloc[st_key]["defensive"])
-        df_w = _risk_off_weights(risk_off_mode)
 
-        h_des = {}
+        h_des: dict[str, float] = {}
 
+        # Trend slice
         if w_tr > 0 and len(current_trend_tradecols) > 0:
             per = w_tr / len(current_trend_tradecols)
             for tcol in current_trend_tradecols:
                 h_des[tcol] = h_des.get(tcol, 0.0) + per
 
+        # MeanRev slice (inactive -> SHY)
         if w_mr > 0:
             if mr_active and (mr_trade_col in returns.columns):
                 h_des[mr_trade_col] = h_des.get(mr_trade_col, 0.0) + w_mr
             else:
                 h_des["SHY"] = h_des.get("SHY", 0.0) + w_mr
 
+        # Defensive slice
         if w_df > 0:
             for t, w in df_w.items():
                 h_des[t] = h_des.get(t, 0.0) + (w_df * float(w))
@@ -313,38 +300,54 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         if not h_des:
             h_des = {"SHY": 1.0}
 
-        # ✅ costs only on rebalance dates (turnover from current -> desired)
-        if dt in reb_dates:
-            cost_frac = _turnover_cost_frac(h_cur, h_des, buy_cost=buy_cost, sell_cost=sell_cost)
-            if cost_frac > 0:
-                equity *= (1.0 - cost_frac)
+        # ---- PINSET: Top1 asset fast-crash -> force risk_off 100% ----
+        asset_fast_triggered = False
+        asset_fast_ret = np.nan
+        asset_fast_col = ""
 
-        curve.append(equity)
+        if af_enabled and af_scope == "trend_top1":
+            if st == "BULL" and len(current_trend_tradecols) > 0:
+                asset_fast_col = current_trend_tradecols[0]
+                if asset_fast_col in prices.columns:
+                    r_af = prices[asset_fast_col].pct_change(af_lb).shift(1).loc[dt]
+                    if pd.notna(r_af):
+                        asset_fast_ret = float(r_af)
+                        if asset_fast_ret <= af_thr:
+                            asset_fast_triggered = True
 
-        # commit tomorrow holdings (keeps your previous behavior)
+        if asset_fast_triggered:
+            h_des = df_w.copy()  # risk_off 100%
+
+        # 3) COMMIT TOMORROW HOLDINGS
         if i < len(idx) - 1:
-            h_cur = h_des
+            h_next = h_des
+            h_cur = h_next
 
-        engine_choice_log.append({
-            "date": str(dt.date()),
-            "state": st,
-            "w_trend": w_tr,
-            "w_meanrev": w_mr,
-            "w_defensive": w_df,
-            "meanrev_active": bool(mr_active),
-            "meanrev_ticker": mr_trade_col if mr_active else "",
-            "rebalance_today": bool(dt in reb_dates),
-            "rebalance_mode": reb_mode,
-            "entry_mode": entry_mode,
-            "buy_cost": buy_cost,
-            "sell_cost": sell_cost,
-        })
+        engine_choice_log.append(
+            {
+                "date": str(dt.date()),
+                "state": st,
+                "w_trend": w_tr,
+                "w_meanrev": w_mr,
+                "w_defensive": w_df,
+                "meanrev_active": bool(mr_active),
+                "meanrev_ticker": mr_trade_col if mr_active else "",
+                "rebalance_today": rebalance_today,
+                "rebalance_mode": reb_mode,
+                "asset_fast_enabled": bool(af_enabled),
+                "asset_fast_lb": int(af_lb),
+                "asset_fast_thr": float(af_thr),
+                "asset_fast_col": asset_fast_col,
+                "asset_fast_ret": (float(asset_fast_ret) if pd.notna(asset_fast_ret) else np.nan),
+                "asset_fast_triggered": bool(asset_fast_triggered),
+            }
+        )
 
     equity_series = pd.Series(curve, index=prices.index, name="equity")
     picks_df = pd.DataFrame(picks_rows)
     holdings_daily = pd.DataFrame(holdings_daily_rows)
 
-    # holdings_weekly (reporting)
+    # holdings_weekly (avg weights within each W-FRI week)
     if not holdings_daily.empty:
         hd = holdings_daily.copy()
         hd["date"] = pd.to_datetime(hd["date"])
