@@ -7,6 +7,7 @@ from src.core.state import compute_state_flags
 
 
 def _risk_off_weights(mode: str) -> dict:
+    # Cash-like / short-duration
     if mode == "SHY_100":
         return {"SHY": 1.0}
     if mode == "BIL_100":
@@ -14,6 +15,7 @@ def _risk_off_weights(mode: str) -> dict:
     if mode == "SGOV_100":
         return {"SGOV_MIX": 1.0}
 
+    # Gold mixes
     if mode == "SHY_GLD_50_50":
         return {"SHY": 0.5, "GLD": 0.5}
     if mode == "SHY_70_GLD_30":
@@ -21,6 +23,7 @@ def _risk_off_weights(mode: str) -> dict:
     if mode == "GLD_100":
         return {"GLD": 1.0}
 
+    # Inverse equity (MIX = proxy pre-listing, real after listing)
     if mode == "SH_100":
         return {"SH_MIX": 1.0}
     if mode == "PSQ_100":
@@ -30,6 +33,7 @@ def _risk_off_weights(mode: str) -> dict:
 
 
 def _trend_universe_to_trade_col(ticker: str) -> str:
+    # Trend는 3x MIX
     if ticker == "QQQ":
         return "TQQQ_MIX"
     if ticker == "SPY":
@@ -40,6 +44,7 @@ def _trend_universe_to_trade_col(ticker: str) -> str:
 
 
 def _meanrev_universe_to_trade_col(ticker: str) -> str:
+    # MeanRev는 2x MIX
     if ticker == "QQQ":
         return "QLD_MIX"
     if ticker == "SPY":
@@ -64,12 +69,23 @@ def _normalize_weights(h: dict) -> dict:
     return {k: float(v / s) for k, v in h.items()}
 
 
-def _turnover_cost_frac(w_prev: dict, w_new: dict, buy_cost: float, sell_cost: float) -> float:
+def _turnover_cost_frac(
+    w_prev: dict,
+    w_new: dict,
+    buy_cost: float,
+    sell_cost: float,
+) -> float:
+    """
+    Cost fraction for transitioning w_prev -> w_new.
+    Apply as: equity *= (1 - cost_frac)
+    """
     if buy_cost <= 0 and sell_cost <= 0:
         return 0.0
+
     keys = set(w_prev.keys()) | set(w_new.keys())
     buy_turn = 0.0
     sell_turn = 0.0
+
     for k in keys:
         prev = float(w_prev.get(k, 0.0))
         new = float(w_new.get(k, 0.0))
@@ -78,18 +94,18 @@ def _turnover_cost_frac(w_prev: dict, w_new: dict, buy_cost: float, sell_cost: f
             buy_turn += d
         elif d < 0:
             sell_turn += (-d)
+
     cost_frac = buy_turn * float(buy_cost) + sell_turn * float(sell_cost)
     return float(max(cost_frac, 0.0))
 
 
 def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     """
-    A 버전:
-      - 포지션 변경은 reb_dates(월말)에서만 발생
-      - state(BULL/BEAR/CRASH)도 reb_dates에서만 업데이트되고 그 사이엔 고정
-      - 비용도 reb_dates에서만 turnover 기반 차감
-      - entry_mode는 그대로 두되(기본 next_close), 실제 체결 모델은 기존과 동일(다음날부터 적용)
-        *즉, "월말 한번만 갈아타는" 구조를 강제하는 게 목적
+    Existing structure:
+      - State (BULL/BEAR/CRASH) computed DAILY and affects weights immediately
+      - Trend picks updated ONLY on rebalance dates (weekly/biweekly/monthly/quarterly)
+      - Holdings apply next trading day (lookahead-free intent)
+      - Costs applied ONLY on rebalance dates via turnover fraction
 
     Returns:
       equity, engine_choice_log, picks_df, holdings_daily, holdings_weekly
@@ -97,7 +113,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     prices = prices.copy()
     returns = prices.pct_change().fillna(0.0)
 
-    # state flags (daily series, but we'll "sample" monthly)
     state_df = compute_state_flags(prices, cfg)
 
     # ---- Costs ----
@@ -107,7 +122,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
 
     # ---- Portfolio config ----
     port_cfg = cfg.get("portfolio", {}) or {}
-    reb_mode = str(port_cfg.get("rebalance", "weekly")).lower().strip()
+    reb_mode = str(port_cfg.get("rebalance", "weekly")).lower().strip()  # weekly|biweekly|monthly|quarterly
     when_mode = str(port_cfg.get("when", "week_end")).lower().strip()
     entry_mode = str(port_cfg.get("entry", "next_close")).lower().strip()
 
@@ -115,6 +130,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     trend_cfg = cfg.get("trend_engine", {}) or {}
     mom_lb = int(trend_cfg.get("mom_lookback_days", 168))
     candidates = trend_cfg.get("candidates", trend_cfg.get("universe", ["QQQ", "SPY", "SOXX"]))
+
     sel_cfg = cfg.get("selection", {}) or {}
     top_n = int(sel_cfg.get("top_n", trend_cfg.get("top_n", 1)))
 
@@ -156,7 +172,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     else:
         reb_dates = fridays
 
-    # Weekly closes for weekly reporting
+    # Weekly closes for weekly return reporting
     wclose = _weekly_close(prices)
 
     def get_week_ret(ticker_col: str, wk_end: pd.Timestamp) -> float:
@@ -171,18 +187,19 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             return np.nan
         return float(cur / prev - 1.0)
 
-    # --- Trend picks state ---
+    # Trend picks state
     current_trend_tradecols = []
     picks_rows = []
 
-    # --- MeanRev position state (we will ONLY allow changes on reb_dates as well) ---
+    # MeanRev position state (runs daily)
     mr_active = False
     mr_entry_price = None
     mr_days = 0
     mr_trade_col = None
 
-    # --- Holdings ---
-    h_cur = {"SHY": 1.0}  # start parked
+    # Holdings (start parked)
+    h_cur = {"SHY": 1.0}
+
     equity = 1.0
     curve = []
     engine_choice_log = []
@@ -190,30 +207,22 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
 
     idx = prices.index
 
-    # ✅ effective_state: rebalance day에만 업데이트
-    effective_state = str(state_df.iloc[0]["state"])
-
     for i, dt in enumerate(idx):
-        # (A) log holdings
-        for t, w in h_cur.items():
-            holdings_daily_rows.append(
-                {"date": str(dt.date()), "ticker": t, "weight": float(w), "state": effective_state}
-            )
+        st = state_df.loc[dt, "state"]
 
-        # (B) apply today's return using current holdings
+        # 1) apply today's return using h_cur
+        for t, w in h_cur.items():
+            holdings_daily_rows.append({"date": str(dt.date()), "ticker": t, "weight": float(w), "state": st})
+
         daily_ret = 0.0
         for t, w in h_cur.items():
             if t in returns.columns:
                 daily_ret += float(returns.loc[dt, t]) * float(w)
+
         equity *= (1.0 + daily_ret)
 
-        # (C) update effective_state ONLY on rebalance dates
+        # 2) trend picks update only on rebalance dates
         if dt in reb_dates:
-            effective_state = str(state_df.loc[dt, "state"])
-
-        # (D) compute desired holdings ONLY on rebalance dates
-        if dt in reb_dates:
-            # trend pick update
             m = mom.loc[dt, candidates] if all([c in mom.columns for c in candidates]) else mom.loc[dt].reindex(candidates)
             ranked = m.dropna().sort_values(ascending=False)
             if ranked.empty:
@@ -241,102 +250,98 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             row["rank2_week_ret"] = get_week_ret(row["rank2_trade"], wk) if row["rank2_trade"] else np.nan
             picks_rows.append(row)
 
-            # meanrev update ONLY on rebalance dates (A 정책)
-            mr_price_under = prices[mr_base] if mr_base in prices.columns else None
-            if mr_price_under is None or mr_price_under.isna().all():
-                mr_active = False
-                mr_trade_col = None
-                mr_entry_price = None
-                mr_days = 0
-            else:
-                r_lb = mr_price_under.pct_change(mr_lb).shift(1).loc[dt]
-                if (not mr_active) and pd.notna(r_lb) and (float(r_lb) <= mr_drop):
-                    mr_active = True
-                    mr_trade_col = _meanrev_universe_to_trade_col(mr_base)
-                    mr_entry_price = prices[mr_trade_col].loc[dt] if mr_trade_col in prices.columns else None
-                    mr_days = 0
+        # 3) meanrev decisions daily (unchanged)
+        mr_price_under = prices[mr_base] if mr_base in prices.columns else None
+        if mr_price_under is None or mr_price_under.isna().all():
+            mr_active = False
+            mr_trade_col = None
+            mr_entry_price = None
+            mr_days = 0
+        else:
+            r_lb = mr_price_under.pct_change(mr_lb).shift(1).loc[dt]
 
-                if mr_active:
-                    mr_days += 1
-                    cur_px = prices[mr_trade_col].loc[dt] if (mr_trade_col in prices.columns) else np.nan
-                    if mr_entry_price is None or pd.isna(mr_entry_price) or pd.isna(cur_px):
+            if (not mr_active) and pd.notna(r_lb) and (float(r_lb) <= mr_drop):
+                mr_active = True
+                mr_trade_col = _meanrev_universe_to_trade_col(mr_base)
+                mr_entry_price = prices[mr_trade_col].loc[dt] if mr_trade_col in prices.columns else None
+                mr_days = 0
+
+            if mr_active:
+                mr_days += 1
+                cur_px = prices[mr_trade_col].loc[dt] if (mr_trade_col in prices.columns) else np.nan
+                if mr_entry_price is None or pd.isna(mr_entry_price) or pd.isna(cur_px):
+                    mr_active = False
+                    mr_trade_col = None
+                    mr_entry_price = None
+                    mr_days = 0
+                else:
+                    pnl = float(cur_px / mr_entry_price - 1.0)
+                    if (mr_days >= mr_hold) or (pnl >= mr_tp) or (pnl <= mr_sl):
                         mr_active = False
                         mr_trade_col = None
                         mr_entry_price = None
                         mr_days = 0
-                    else:
-                        pnl = float(cur_px / mr_entry_price - 1.0)
-                        if (mr_days >= mr_hold) or (pnl >= mr_tp) or (pnl <= mr_sl):
-                            mr_active = False
-                            mr_trade_col = None
-                            mr_entry_price = None
-                            mr_days = 0
 
-            # build desired holdings based on effective_state snapshot
-            st_key = effective_state.lower()
-            w_tr = float(alloc[st_key]["trend"])
-            w_mr = float(alloc[st_key]["meanrev"])
-            w_df = float(alloc[st_key]["defensive"])
-            df_w = _risk_off_weights(risk_off_mode)
+        # 4) build desired holdings DAILY based on today's state
+        st_key = st.lower()
+        w_tr = float(alloc[st_key]["trend"])
+        w_mr = float(alloc[st_key]["meanrev"])
+        w_df = float(alloc[st_key]["defensive"])
+        df_w = _risk_off_weights(risk_off_mode)
 
-            h_des = {}
+        h_des = {}
 
-            if w_tr > 0 and len(current_trend_tradecols) > 0:
-                per = w_tr / len(current_trend_tradecols)
-                for tcol in current_trend_tradecols:
-                    h_des[tcol] = h_des.get(tcol, 0.0) + per
+        if w_tr > 0 and len(current_trend_tradecols) > 0:
+            per = w_tr / len(current_trend_tradecols)
+            for tcol in current_trend_tradecols:
+                h_des[tcol] = h_des.get(tcol, 0.0) + per
 
-            if w_mr > 0:
-                if mr_active and (mr_trade_col in returns.columns):
-                    h_des[mr_trade_col] = h_des.get(mr_trade_col, 0.0) + w_mr
-                else:
-                    h_des["SHY"] = h_des.get("SHY", 0.0) + w_mr
+        if w_mr > 0:
+            if mr_active and (mr_trade_col in returns.columns):
+                h_des[mr_trade_col] = h_des.get(mr_trade_col, 0.0) + w_mr
+            else:
+                h_des["SHY"] = h_des.get("SHY", 0.0) + w_mr
 
-            if w_df > 0:
-                for t, w in df_w.items():
-                    h_des[t] = h_des.get(t, 0.0) + (w_df * float(w))
+        if w_df > 0:
+            for t, w in df_w.items():
+                h_des[t] = h_des.get(t, 0.0) + (w_df * float(w))
 
-            h_des = _normalize_weights(h_des)
-            if not h_des:
-                h_des = {"SHY": 1.0}
+        h_des = _normalize_weights(h_des)
+        if not h_des:
+            h_des = {"SHY": 1.0}
 
-            # costs on rebalance (turnover between current -> desired)
+        # ✅ costs only on rebalance dates (turnover from current -> desired)
+        if dt in reb_dates:
             cost_frac = _turnover_cost_frac(h_cur, h_des, buy_cost=buy_cost, sell_cost=sell_cost)
             if cost_frac > 0:
                 equity *= (1.0 - cost_frac)
 
-            # commit holdings for tomorrow (keeps your previous "next_close/next_open" naming, but behavior is D+1 apply)
-            if i < len(idx) - 1:
-                h_cur = h_des
-
-            engine_choice_log.append({
-                "date": str(dt.date()),
-                "state_effective": effective_state,
-                "rebalance_today": True,
-                "rebalance_mode": reb_mode,
-                "entry_mode": entry_mode,
-                "buy_cost": buy_cost,
-                "sell_cost": sell_cost,
-            })
-        else:
-            # non-rebalance day log (no changes)
-            engine_choice_log.append({
-                "date": str(dt.date()),
-                "state_effective": effective_state,
-                "rebalance_today": False,
-                "rebalance_mode": reb_mode,
-                "entry_mode": entry_mode,
-                "buy_cost": buy_cost,
-                "sell_cost": sell_cost,
-            })
-
         curve.append(equity)
+
+        # commit tomorrow holdings (keeps your previous behavior)
+        if i < len(idx) - 1:
+            h_cur = h_des
+
+        engine_choice_log.append({
+            "date": str(dt.date()),
+            "state": st,
+            "w_trend": w_tr,
+            "w_meanrev": w_mr,
+            "w_defensive": w_df,
+            "meanrev_active": bool(mr_active),
+            "meanrev_ticker": mr_trade_col if mr_active else "",
+            "rebalance_today": bool(dt in reb_dates),
+            "rebalance_mode": reb_mode,
+            "entry_mode": entry_mode,
+            "buy_cost": buy_cost,
+            "sell_cost": sell_cost,
+        })
 
     equity_series = pd.Series(curve, index=prices.index, name="equity")
     picks_df = pd.DataFrame(picks_rows)
     holdings_daily = pd.DataFrame(holdings_daily_rows)
 
-    # holdings_weekly reporting
+    # holdings_weekly (reporting)
     if not holdings_daily.empty:
         hd = holdings_daily.copy()
         hd["date"] = pd.to_datetime(hd["date"])
