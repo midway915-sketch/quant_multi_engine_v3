@@ -31,10 +31,10 @@ meanrev_engine:
 
 allocator:
   bull:
-    trend: [1.00]
+    trend: [1.00, 0.90, 0.75]
     meanrev: [0.00]
-    defensive: [0.00]
-
+    defensive: [0.00, 0.10, 0.25]
+    
   bear:
     trend: [0.00]
     meanrev: [0.00]
