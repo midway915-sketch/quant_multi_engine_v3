@@ -1,0 +1,148 @@
+name: run-grid-pinset
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: "Base config yml"
+        required: true
+        default: "config/default_stress_costs.yml"
+      grid_path:
+        description: "Pinset grid config yml"
+        required: true
+        default: "config/grid_pinset.yml"
+      out_dir:
+        description: "Base output directory"
+        required: true
+        default: "out/grid_pinset"
+      shard_count:
+        description: "Number of shards (parallel jobs)"
+        required: true
+        default: "8"
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build prices.csv once
+        run: |
+          mkdir -p out/prep
+          python -c "import yaml; import pandas as pd; from src.core.data import download_prices_and_build_proxies as fn; cfg=yaml.safe_load(open('${{ inputs.config_path }}','r',encoding='utf-8')); px=fn(cfg); px.to_csv('out/prep/prices.csv', index=True)"
+
+      - name: Upload prices artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-pinset-prices
+          if-no-files-found: error
+          path: |
+            out/prep/prices.csv
+
+  run:
+    runs-on: ubuntu-latest
+    needs: [prep]
+    strategy:
+      fail-fast: false
+      matrix:
+        shard_index: [0, 1, 2, 3, 4, 5, 6, 7]
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+      SHARD_COUNT: ${{ inputs.shard_count }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download prices artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: grid-pinset-prices
+          path: out/prep
+
+      - name: Run grid shard (reuse prices.csv)
+        run: |
+          OUT="${{ inputs.out_dir }}_shard_${{ matrix.shard_index }}"
+          mkdir -p "${OUT}"
+          python -m scripts.run_grid \
+            --config "${{ inputs.config_path }}" \
+            --grid "${{ inputs.grid_path }}" \
+            --out "${OUT}" \
+            --shard-index "${{ matrix.shard_index }}" \
+            --shard-count "${SHARD_COUNT}" \
+            --prices-csv "out/prep/prices.csv"
+
+      - name: Upload artifacts (shard)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-pinset-results-shard-${{ matrix.shard_index }}
+          if-no-files-found: warn
+          path: |
+            ${{ inputs.out_dir }}_shard_${{ matrix.shard_index }}/
+
+  aggregate:
+    runs-on: ubuntu-latest
+    needs: [run]
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download all shard artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: out/shards
+
+      - name: Aggregate summaries
+        run: |
+          python -m scripts.aggregate_grid \
+            --shards-root out/shards \
+            --out "${{ inputs.out_dir }}_merged"
+
+      - name: Upload artifacts (merged)
+        uses: actions/upload-artifact@v4
+        with:
+          name: grid-pinset-results-merged
+          if-no-files-found: warn
+          path: |
+            ${{ inputs.out_dir }}_merged/
