@@ -225,6 +225,9 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         if dt in reb_dates:
             m = mom.loc[dt, candidates] if all([c in mom.columns for c in candidates]) else mom.loc[dt].reindex(candidates)
             ranked = m.dropna().sort_values(ascending=False)
+            sw = (cfg.get("switches", {}) or {})
+            if bool(sw.get("ban_soxx", False)):
+                ranked = ranked.drop(index=[x for x in ranked.index if x == "SOXX"], errors="ignore")
             if ranked.empty:
                 top1, top2 = None, None
                 current_trend_tradecols = []
