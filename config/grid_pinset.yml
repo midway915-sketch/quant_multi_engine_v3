@@ -10,7 +10,7 @@ state:
   ma_days: [150]
   min_hold_days: [11]          # legacy (hold_mode=both일 때 사용)
   hold_mode: ["both", "reentry"]
-  reentry_hold_days: [0, 3, 5, 7]  # hold_mode=reentry일 때만 의미 있음
+  reentry_hold_days: [0, 1, 2, 3]  # hold_mode=reentry일 때만 의미 있음
 
 # ✅ crash: 기존 12일 -10% 유지 + FAST_CRASH 추가 스캔
 crash:
@@ -19,8 +19,8 @@ crash:
   threshold: [-0.10]
   fast:
     enabled: [true]
-    lookback_days: [5]
-    threshold: [-0.08, -0.10]
+    lookback_days: [3, 4, 5]
+    threshold: [-0.06, -0.07, -0.08, -0.09, -0.10]
 
 risk_off:
   mode: ["SGOV_100"]
