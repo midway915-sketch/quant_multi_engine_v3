@@ -1,4 +1,4 @@
-# config/grid_merge4_assetfast_cooldown_ablation.yml
+# config/grid_merge4_soxx_gate_ablation.yml
 
 data:
   prices_start: ["2000-01-01"]
@@ -22,12 +22,13 @@ bear_fast:
   lookback_days: [3]
   threshold: [-0.045]
 
-asset_fast:
+# ✅ NEW: SOXX 조건부 허용
+soxx_gate:
   enabled: [false, true]
-  scope: ["trend_top1"]
-  mode: ["one_day", "to_next_rebalance"]
-  lookback_days: [3, 5, 7, 10]
-  threshold: [-0.06, -0.08, -0.10, -0.12]
+  mode: ["mom"]
+  mom_lookback_days: [20]
+  mom_threshold: [0.0]   # 20일 모멘텀 > 0이면 허용
+  ma_days: [50]          # mode=ma로 바꿀 때만 사용
 
 risk_off:
   mode: ["SGOV_100"]
