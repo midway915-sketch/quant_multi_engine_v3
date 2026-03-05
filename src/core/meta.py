@@ -64,22 +64,51 @@ def _normalize_weights(h: dict) -> dict:
     return {k: float(v / s) for k, v in h.items()}
 
 
+def _turnover_cost_frac(w_prev: dict, w_new: dict, buy_cost: float, sell_cost: float) -> float:
+    """
+    Portfolio-level cost fraction for transitioning w_prev -> w_new.
+    Costs are applied on notional traded at rebalance close:
+      - buy_cost on increases (delta>0)
+      - sell_cost on decreases (delta<0)
+    """
+    buy_cost = float(buy_cost)
+    sell_cost = float(sell_cost)
+    if buy_cost <= 0 and sell_cost <= 0:
+        return 0.0
+
+    keys = set(w_prev.keys()) | set(w_new.keys())
+    buy_turn = 0.0
+    sell_turn = 0.0
+
+    for k in keys:
+        prev = float(w_prev.get(k, 0.0))
+        new = float(w_new.get(k, 0.0))
+        d = new - prev
+        if d > 0:
+            buy_turn += d
+        elif d < 0:
+            sell_turn += (-d)
+
+    cost_frac = buy_turn * buy_cost + sell_turn * sell_cost
+    if cost_frac < 0:
+        cost_frac = 0.0
+    return float(cost_frac)
+
+
 def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     """
     Lookahead-free:
       - Today's return uses yesterday's confirmed holdings
       - Signals/picks computed at date dt are applied starting next trading day
 
-    + SOXX gate:
-      - if Top1 is SOXX, allow only when condition holds (default: SOXX 20d momentum > 0, shift(1))
-      - otherwise drop SOXX and pick next best (QQQ/SPY)
+    + 거래비용 적용:
+      - dt에서 h_cur(오늘 보유)로 수익률 반영 후,
+      - dt에서 계산한 h_des(내일 보유)로 바꿀 때(= dt close 체결 가정),
+        turnover 기반 비용을 equity에 차감 (equity *= (1 - cost_frac))
 
-    Returns:
-      equity: pd.Series
-      engine_choice_log: list[dict]
-      picks_top2_weekly: pd.DataFrame
-      holdings_daily: pd.DataFrame
-      holdings_weekly: pd.DataFrame
+    + SOXX gate:
+      - if Top1 is SOXX, allow only when condition holds (mom/ma; shift(1))
+      - otherwise drop SOXX and pick next best (QQQ/SPY)
     """
     prices = prices.copy()
     returns = prices.pct_change().fillna(0.0)
@@ -88,8 +117,13 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
 
     # ---- Portfolio config ----
     port_cfg = cfg.get("portfolio", {}) or {}
-    reb_mode = str(port_cfg.get("rebalance", "weekly")).lower().strip()  # weekly|biweekly|monthly|quarterly
+    reb_mode = str(port_cfg.get("rebalance", "weekly")).lower().strip()
     when_mode = str(port_cfg.get("when", "week_end")).lower().strip()
+
+    # ---- Costs ----
+    costs_cfg = cfg.get("costs", {}) or {}
+    buy_cost = float(costs_cfg.get("buy", 0.0))
+    sell_cost = float(costs_cfg.get("sell", 0.0))
 
     # ---- Trend config ----
     trend_cfg = cfg.get("trend_engine", {}) or {}
@@ -103,7 +137,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
 
     mom = prices.pct_change(mom_lb)
 
-    # ---- MeanRev config (kept; allocator usually sets 0) ----
+    # ---- MeanRev config (allocator가 0이어도 보존) ----
     mr_cfg = cfg.get("meanrev_engine", {}) or {}
     mr_lb = int(mr_cfg.get("lookback_days", 20))
     mr_drop = float(mr_cfg.get("drop_threshold", -0.12))
@@ -134,24 +168,18 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     soxx_gate_ma_days = int(soxx_gate.get("ma_days", 50))
 
     def soxx_allowed(dt: pd.Timestamp) -> tuple[bool, float]:
-        """
-        returns (allowed, score_value) where score_value is mom/ma_diff used for debug logging.
-        lookahead-safe: shift(1)
-        """
+        # lookahead-safe: shift(1)
         if "SOXX" not in prices.columns:
             return (False, float("nan"))
-
         s = prices["SOXX"].astype(float)
 
         if soxx_gate_mode == "ma":
             ma = s.rolling(soxx_gate_ma_days).mean()
-            # allow if yesterday close > yesterday MA
             diff = (s - ma).shift(1).loc[dt]
             if pd.isna(diff):
                 return (False, float("nan"))
             return (bool(diff > 0.0), float(diff))
 
-        # default: momentum gate
         m = s.pct_change(soxx_gate_mom_lb).shift(1).loc[dt]
         if pd.isna(m):
             return (False, float("nan"))
@@ -202,10 +230,8 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     mr_days = 0
     mr_trade_col = None
 
-    # --- Holdings ---
+    # --- Holdings (lookahead-free) ---
     h_cur = {"SHY": 1.0}
-    h_next = h_cur.copy()
-
     equity = 1.0
     curve = []
     engine_choice_log = []
@@ -226,42 +252,32 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                 daily_ret += float(returns.loc[dt, t]) * float(w)
 
         equity *= (1.0 + daily_ret)
-        curve.append(equity)
 
-        # 2) SIGNALS / desired holdings for TOMORROW
+        # 2) COMPUTE SIGNALS / desired holdings for TOMORROW
         rebalance_today = bool(dt in reb_dates)
 
         # (a) Trend picks updated ONLY on rebalance dates
-        soxx_gate_allowed = True
-        soxx_gate_value = float("nan")
         soxx_gate_applied = False
         soxx_gate_blocked = False
+        soxx_gate_value = float("nan")
 
         if rebalance_today:
             m = mom.loc[dt].reindex(candidates)
             ranked = m.dropna().sort_values(ascending=False)
 
-            # pick initial top list
-            if ranked.empty:
-                top = []
-            else:
-                top = list(ranked.index[:top_n])
+            top = list(ranked.index[:top_n]) if not ranked.empty else []
 
-            # SOXX gate: if SOXX is rank1, decide allow/block; if blocked, drop SOXX and re-pick
             if soxx_gate_enabled and len(top) > 0 and top[0] == "SOXX":
                 soxx_gate_applied = True
                 ok, val = soxx_allowed(dt)
-                soxx_gate_allowed = ok
                 soxx_gate_value = val
                 if not ok:
                     soxx_gate_blocked = True
                     ranked2 = ranked.drop(index=["SOXX"], errors="ignore")
                     top = list(ranked2.index[:top_n])
 
-            # finalize trade cols
             current_trend_tradecols = [_trend_universe_to_trade_col(t) for t in top if t is not None]
 
-            # log picks
             wk = _week_end_index(pd.DatetimeIndex([dt]))[0]
             top1 = top[0] if len(top) > 0 else None
             top2 = top[1] if len(top) > 1 else (ranked.index[1] if len(ranked) > 1 else None)
@@ -326,20 +342,17 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
 
         h_des: dict[str, float] = {}
 
-        # Trend slice
         if w_tr > 0 and len(current_trend_tradecols) > 0:
             per = w_tr / len(current_trend_tradecols)
             for tcol in current_trend_tradecols:
                 h_des[tcol] = h_des.get(tcol, 0.0) + per
 
-        # MeanRev slice
         if w_mr > 0:
             if mr_active and (mr_trade_col in returns.columns):
                 h_des[mr_trade_col] = h_des.get(mr_trade_col, 0.0) + w_mr
             else:
                 h_des["SHY"] = h_des.get("SHY", 0.0) + w_mr
 
-        # Defensive slice
         if w_df > 0:
             for t, w in df_w.items():
                 h_des[t] = h_des.get(t, 0.0) + (w_df * float(w))
@@ -348,10 +361,26 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         if not h_des:
             h_des = {"SHY": 1.0}
 
-        # 3) COMMIT TOMORROW HOLDINGS
+        # 2.5) APPLY TURNOVER COST (dt close) AND COMMIT TOMORROW HOLDINGS
+        traded = False
+        turnover = 0.0
+        cost_frac = 0.0
+
         if i < len(idx) - 1:
-            h_next = h_des
-            h_cur = h_next
+            keys = set(h_cur.keys()) | set(h_des.keys())
+            for k in keys:
+                turnover += abs(float(h_des.get(k, 0.0)) - float(h_cur.get(k, 0.0)))
+            # turnover is sum |Δw|, one-way turnover is turnover/2
+            traded = turnover > 1e-12
+
+            cost_frac = _turnover_cost_frac(h_cur, h_des, buy_cost, sell_cost)
+            if cost_frac > 0:
+                equity *= (1.0 - cost_frac)
+
+            h_cur = h_des
+
+        # append end-of-day equity AFTER costs
+        curve.append(equity)
 
         engine_choice_log.append(
             {
@@ -364,6 +393,12 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                 "meanrev_ticker": mr_trade_col if mr_active else "",
                 "rebalance_today": bool(rebalance_today),
                 "rebalance_mode": reb_mode,
+                "turnover_sum_abs": float(turnover),
+                "turnover_one_way": float(turnover) * 0.5,
+                "cost_buy": float(buy_cost),
+                "cost_sell": float(sell_cost),
+                "cost_frac": float(cost_frac),
+                "traded": bool(traded),
             }
         )
 
@@ -372,7 +407,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     holdings_daily = pd.DataFrame(holdings_daily_rows)
 
     # holdings_weekly (avg weights within each W-FRI week)
-    wclose = _weekly_close(prices)
     if not holdings_daily.empty:
         hd = holdings_daily.copy()
         hd["date"] = pd.to_datetime(hd["date"])
