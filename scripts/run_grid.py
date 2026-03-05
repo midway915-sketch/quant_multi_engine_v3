@@ -88,26 +88,55 @@ def flatten_dict(d: Any, prefix: str = "") -> Dict[str, Any]:
     return out
 
 
-def _year_return_and_mdd(eq: pd.Series, year: int) -> Dict[str, float]:
+def max_recovery_days(eq: pd.Series) -> Tuple[float, float]:
     """
-    Compute calendar-year return and within-year MDD based on equity series.
-    Returns NaN if year not present.
+    Max time-to-recover (peak -> first time equity exceeds that peak again).
+    Returns (max_days, max_years). If never recovers, uses last date as end.
+
+    Definition:
+      peak at time t0, drawdown until it recovers at tr (first date eq >= peak).
+      duration = (tr - t0).days
     """
     if eq is None or eq.empty:
-        return {"ret": math.nan, "mdd": math.nan}
+        return (math.nan, math.nan)
 
-    seg = eq.loc[(eq.index >= pd.Timestamp(f"{year}-01-01")) & (eq.index <= pd.Timestamp(f"{year}-12-31"))]
-    if seg.empty or len(seg) < 10:
-        return {"ret": math.nan, "mdd": math.nan}
+    s = eq.dropna()
+    if s.empty:
+        return (math.nan, math.nan)
 
-    base = float(seg.iloc[0])
-    last = float(seg.iloc[-1])
-    if base <= 0 or pd.isna(base) or pd.isna(last):
-        return {"ret": math.nan, "mdd": math.nan}
+    idx = s.index
+    vals = s.values
 
-    seg_rebased = seg / base
-    met = compute_metrics(seg_rebased)
-    return {"ret": float(last / base - 1.0), "mdd": float(met["mdd"])}
+    peak_val = vals[0]
+    peak_date = idx[0]
+    in_dd = False
+    max_days = 0.0
+
+    for i in range(1, len(vals)):
+        v = float(vals[i])
+        d = idx[i]
+
+        if v >= peak_val:
+            # recovered (if in drawdown)
+            if in_dd:
+                days = float((d - peak_date).days)
+                if days > max_days:
+                    max_days = days
+                in_dd = False
+            # new peak
+            peak_val = v
+            peak_date = d
+        else:
+            # below peak => drawdown
+            in_dd = True
+
+    # if still in drawdown at end -> treat as unrecovered until last date
+    if in_dd:
+        days = float((idx[-1] - peak_date).days)
+        if days > max_days:
+            max_days = days
+
+    return (max_days, max_days / 365.25)
 
 
 def parse_args():
@@ -118,6 +147,7 @@ def parse_args():
 
     ap.add_argument("--shard-index", type=int, default=0, help="0-based shard index")
     ap.add_argument("--shard-count", type=int, default=1, help="number of shards (>=1)")
+
     ap.add_argument("--prices-csv", default="", help="Path to prebuilt prices.csv (if set, skip download)")
     return ap.parse_args()
 
@@ -164,7 +194,7 @@ def main():
             ensure_ascii=False,
         )
 
-    # prices
+    # prices: load from csv if provided, else download
     if args.prices_csv:
         if not os.path.exists(args.prices_csv):
             raise FileNotFoundError(f"--prices-csv not found: {args.prices_csv}")
@@ -180,12 +210,12 @@ def main():
     rows: List[dict] = []
 
     t0 = time.time()
-    progress_every = max(1, n // 50)  # ✅ 더 자주 진행률
+    progress_every = max(1, n // 50)  # ✅ 더 자주 출력 (2% 단위)
 
     for i, overlay in enumerate(param_sets, 1):
         cfg = deep_merge(base_cfg, overlay)
 
-        # guard
+        # allocator 값이 list로 남아있으면 grid 확장 실패
         if "allocator" in cfg:
             for bucket in ("bull", "bear", "crash"):
                 if bucket in cfg["allocator"]:
@@ -208,10 +238,9 @@ def main():
         else:
             met_10y = {"seed_multiple": math.nan, "cagr": math.nan, "mdd": math.nan}
 
-        # ✅ pinset target years
-        y2011 = _year_return_and_mdd(eq, 2011)
-        y2022 = _year_return_and_mdd(eq, 2022)
-        y2008 = _year_return_and_mdd(eq, 2008)
+        # ✅ max recovery (full + 10y)
+        rec_days, rec_years = max_recovery_days(eq)
+        rec10_days, rec10_years = max_recovery_days(eq_10y) if len(eq_10y) > 10 else (math.nan, math.nan)
 
         pid = short_param_id(overlay)
 
@@ -223,29 +252,17 @@ def main():
             "seed_multiple_10y": float(met_10y["seed_multiple"]),
             "cagr_10y": float(met_10y["cagr"]),
             "mdd_10y": float(met_10y["mdd"]),
-            # pinset years
-            "ret_2011": float(y2011["ret"]),
-            "mdd_2011": float(y2011["mdd"]),
-            "ret_2022": float(y2022["ret"]),
-            "mdd_2022": float(y2022["mdd"]),
-            "ret_2008": float(y2008["ret"]),
-            "mdd_2008": float(y2008["mdd"]),
+            # ✅ NEW
+            "max_recovery_days": float(rec_days),
+            "max_recovery_years": float(rec_years),
+            "max_recovery_10y_days": float(rec10_days),
+            "max_recovery_10y_years": float(rec10_years),
         }
-
-        # pct columns
         row["cagr_pct"] = row["cagr"] * 100.0
         row["mdd_pct"] = row["mdd"] * 100.0
         row["cagr_10y_pct"] = row["cagr_10y"] * 100.0
         row["mdd_10y_pct"] = row["mdd_10y"] * 100.0
 
-        row["ret_2011_pct"] = row["ret_2011"] * 100.0
-        row["mdd_2011_pct"] = row["mdd_2011"] * 100.0
-        row["ret_2022_pct"] = row["ret_2022"] * 100.0
-        row["mdd_2022_pct"] = row["mdd_2022"] * 100.0
-        row["ret_2008_pct"] = row["ret_2008"] * 100.0
-        row["mdd_2008_pct"] = row["mdd_2008"] * 100.0
-
-        # include params
         row["params_json"] = json.dumps(overlay, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
         flat_params = flatten_dict(overlay)
         for k, v in flat_params.items():
@@ -253,13 +270,10 @@ def main():
 
         rows.append(row)
 
-        # best by robust objective (pinset-aware):
-        # maximize 10y CAGR while penalizing 2011/2022 drawdowns
-        # score = cagr_10y - 0.25*abs(mdd_2011) - 0.25*abs(mdd_2022)
-        score = row["cagr_10y"] - 0.25 * abs(row["mdd_2011"]) - 0.25 * abs(row["mdd_2022"])
-
-        if (best is None) or (score > best):
-            best = score
+        # best by 10y CAGR (기존은 cagr로 했었는데, 너는 10y를 많이 봐서 10y로 추천)
+        key_score = row["cagr_10y"]
+        if (best is None) or (key_score > best):
+            best = key_score
             best_row = row
             best_params = overlay
 
@@ -269,29 +283,16 @@ def main():
             holdings_daily.to_csv(os.path.join(out_dir, "holdings_daily.csv"), index=False)
             holdings_weekly.to_csv(os.path.join(out_dir, "holdings_weekly.csv"), index=False)
             with open(os.path.join(out_dir, "metrics.json"), "w", encoding="utf-8") as f:
-                json.dump(
-                    {
-                        "all": met,
-                        "recent_10y": met_10y,
-                        "year_2011": y2011,
-                        "year_2022": y2022,
-                        "year_2008": y2008,
-                        "best_score": best,
-                    },
-                    f,
-                    indent=2,
-                    ensure_ascii=False,
-                )
+                json.dump({"all": met, "recent_10y": met_10y}, f, indent=2, ensure_ascii=False)
 
-        # progress
+        # progress + ETA
         elapsed = time.time() - t0
         per = elapsed / i
         eta = per * (n - i)
         if i == 1 or i % progress_every == 0 or i == n:
             print(
                 f"[PROGRESS] shard={args.shard_index}/{args.shard_count} {i}/{n} "
-                f"iter={per:.2f}s elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m "
-                f"best_score={best:.4f}"
+                f"iter={per:.2f}s elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m best_10y_CAGR={(best*100):.2f}%"
             )
 
     summary = pd.DataFrame(rows).sort_values("cagr_10y", ascending=False)
@@ -304,8 +305,9 @@ def main():
 
     best_params_path = os.path.join(out_dir, "best_params.json")
     with open(best_params_path, "w", encoding="utf-8") as f:
-        json.dump({"param_id": best_row["param_id"], "overlay": best_params, "best_score": best}, f, indent=2, ensure_ascii=False)
+        json.dump({"param_id": best_row["param_id"], "overlay": best_params}, f, indent=2, ensure_ascii=False)
     print(f"[DONE] shard {args.shard_index}: best_params -> {best_params_path}")
+    print(f"[DONE] shard {args.shard_index}: best_10y_CAGR={(best*100):.2f}% out={out_dir}")
 
 
 if __name__ == "__main__":
