@@ -8,11 +8,13 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     Priority: CRASH > BULL > BEAR
     Look-ahead prevention: signals use shift(1)
 
-    Additions:
-      - crash.fast: optional short-lookback crash trigger
-      - state.hold_mode: "both" or "reentry"
-      - state.reentry_hold_days: delay only BULL re-entry
-      - bear_fast: optional short-lookback BEAR trigger (suppresses BULL without declaring CRASH)
+    Features:
+      - crash: main (lb,thr) + optional fast (short lb,thr)
+      - hold_mode:
+          * "both": legacy min_hold applies to BOTH exit/reentry (run-length)
+          * "reentry": delay ONLY BULL re-entry (exit fast)
+      - bear_fast: optional short-lookback BEAR trigger
+          * IMPORTANT: applied AFTER hold filter so it can force immediate exit
     """
     debug = bool(cfg.get("debug", {}).get("state", False))
 
@@ -33,7 +35,7 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     bull_raw = (p > ma)
     bull = bull_raw.shift(1).fillna(False)
 
-    # ---- CRASH ----
+    # ---- CRASH (main + fast) ----
     crash_cfg = cfg.get("crash", {}) or {}
     crash_enabled = bool(crash_cfg.get("enabled", True))
     crash = pd.Series(False, index=prices.index)
@@ -52,8 +54,15 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         fr = p.pct_change(flb).shift(1)
         crash = (crash | (fr <= fthr).fillna(False))
 
-    # ---- BEAR FAST (new) ----
-    # If triggered, it suppresses BULL (i.e., forces BEAR unless CRASH overrides)
+    # ---- HOLD FILTER (apply BEFORE bear_fast) ----
+    if hold_mode == "both":
+        if min_hold > 0:
+            bull = _min_hold_filter(bull, min_hold)
+    elif hold_mode == "reentry":
+        if reentry_hold > 0:
+            bull = _reentry_hold_filter(bull, reentry_hold)
+
+    # ---- BEAR FAST (apply AFTER hold filter; can force immediate exit) ----
     bear_fast_cfg = (cfg.get("bear_fast", {}) or {})
     bear_fast_enabled = bool(bear_fast_cfg.get("enabled", False))
     bear_fast = pd.Series(False, index=prices.index)
@@ -63,16 +72,8 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         br = p.pct_change(blb).shift(1)
         bear_fast = (br <= bthr).fillna(False)
 
-        # 핵심: bear_fast가 True면 BULL을 억제
+        # force BULL off when bear_fast triggers
         bull = bull & (~bear_fast)
-
-    # ---- HOLD FILTER ----
-    if hold_mode == "both":
-        if min_hold > 0:
-            bull = _min_hold_filter(bull, min_hold)
-    elif hold_mode == "reentry":
-        if reentry_hold > 0:
-            bull = _reentry_hold_filter(bull, reentry_hold)
 
     # ---- STATE ASSIGNMENT ----
     state = pd.Series("BEAR", index=prices.index)
@@ -94,11 +95,17 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         print(f"[STATE-DEBUG] state_counts: {vc}")
         if bear_fast_enabled:
             print(f"[STATE-DEBUG] bear_fast_true={int(bear_fast.sum())}")
+        if crash_enabled:
+            print(f"[STATE-DEBUG] crash_true={int(out['crash_flag'].sum())}")
 
     return out
 
 
 def _min_hold_filter(bull_flag: pd.Series, min_hold_days: int) -> pd.Series:
+    """
+    Legacy run-length enforcement:
+      once flag changes, keep previous flag for min_hold_days.
+    """
     bull_flag = bull_flag.astype(bool).copy()
     vals = bull_flag.values
     if len(vals) == 0:
@@ -123,6 +130,11 @@ def _min_hold_filter(bull_flag: pd.Series, min_hold_days: int) -> pd.Series:
 
 
 def _reentry_hold_filter(bull_flag: pd.Series, reentry_hold_days: int) -> pd.Series:
+    """
+    Delay ONLY BULL re-entry:
+      - False->True requires consecutive True for (reentry_hold_days+1) days.
+      - True->False happens immediately.
+    """
     bull_flag = bull_flag.astype(bool).copy()
     vals = bull_flag.values
     if len(vals) == 0:
@@ -143,7 +155,7 @@ def _reentry_hold_filter(bull_flag: pd.Series, reentry_hold_days: int) -> pd.Ser
             out[i] = last
             continue
 
-        # last False -> reentry requires consecutive True
+        # last False -> reentry needs consecutive True
         if cur is True:
             consec_true += 1
             if consec_true <= reentry_hold_days:
