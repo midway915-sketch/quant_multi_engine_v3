@@ -38,8 +38,9 @@ risk_off:
 trend_engine:
   mom_lookback_days: [126]
   candidates:
-    - ["QQQ", "SPY", "SOXX"]
+    - ["QQQ","SPY","SOXX"]
   top_n: [1]
+  leverage_mode: ["1x", "2x", "proxy_3x"] # "1x", "2x", "proxy_3x"
 
 meanrev_engine:
   lookback_days: [20]
