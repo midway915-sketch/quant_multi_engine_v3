@@ -1,6 +1,4 @@
-# config/grid_pinset_bond.yml
-# Pinset + bond_gate(C안) grid
-
+# config/grid_merge4_refine.yml
 data:
   prices_start: ["2000-01-01"]
 
@@ -8,28 +6,6 @@ state:
   base_ticker: ["SPY"]
   ma_days: [150]
   min_hold_days: [11]
-  hold_mode: ["both"]          # 우선 both 고정(2022 핀셋 효과 보기)
-  reentry_hold_days: [0, 1, 2] # (hold_mode=both에서는 무시되지만, 나중 확장 대비)
-
-# config/grid_ablation_4switch.yml
-
-switches:
-  mom_gate: [false, true]
-  cooldown: [false, true]
-  breadth_gate: [false, true]
-  ban_soxx: [false, true]
-
-  # params for gates (고정값)
-  mom_lookback_days: [63]
-  mom_threshold: [0.0]
-
-  cooldown_days: [20]
-
-  breadth_ticker: ["RSP"]
-  breadth_lookback_days: [63]
-
-# 나머지는 네 base config(default_stress_costs.yml)에 둔다.
-# (grid에 넣으면 조합 수 폭발하니까 여기선 스위치만)
 
 crash:
   enabled: [true]
@@ -37,20 +13,13 @@ crash:
   threshold: [-0.10]
   fast:
     enabled: [true]
-    lookback_days: [4, 5]
-    threshold: [-0.07, -0.08]
+    lookback_days: [3, 4, 5, 6]
+    threshold: [-0.06, -0.07, -0.08, -0.09]
 
 bear_fast:
   enabled: [true]
-  lookback_days: [10, 15]
-  threshold: [-0.04, -0.05]
-
-# ✅ NEW: bond_gate (C안 2단계 게이트)
-bond_gate:
-  enabled: [true]
-  ticker: ["TLT"]
-  lookback_days: [42, 63, 84]
-  threshold: [0.0, 0.02]
+  lookback_days: [7, 10, 12, 15]
+  threshold: [-0.045, -0.05, -0.055, -0.06]
 
 risk_off:
   mode: ["SGOV_100"]
@@ -62,6 +31,7 @@ trend_engine:
   top_n: [1]
 
 meanrev_engine:
+  # 운영 기준대로 0 유지
   lookback_days: [20]
   drop_threshold: [-0.10]
   hold_days: [5]
