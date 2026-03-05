@@ -4,20 +4,33 @@ import numpy as np
 
 
 def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
+    """
+    Priority: CRASH > BULL > BEAR
+    Look-ahead prevention: signals use shift(1)
+
+    merge4-core only:
+      - crash.main (lb,thr)
+      - crash.fast (short lb,thr)  [optional]
+      - min_hold_days hysteresis (legacy)
+      - bear_fast (short lb,thr) applied AFTER hold filter (can force immediate exit)
+    """
     debug = bool(cfg.get("debug", {}).get("state", False))
 
     base = cfg["state"]["base_ticker"]
     if base not in prices.columns:
         raise ValueError(f"state.base_ticker '{base}' not in prices columns: {list(prices.columns)}")
+
     p = prices[base].astype(float)
 
     ma_days = int(cfg["state"]["ma_days"])
+    min_hold = int(cfg["state"].get("min_hold_days", 0))
+
     ma = p.rolling(ma_days).mean()
 
     bull_raw = (p > ma)
     bull = bull_raw.shift(1).fillna(False)
 
-    # ---- CRASH (main + fast) ----
+    # ---- CRASH (main + optional fast) ----
     crash_cfg = cfg.get("crash", {}) or {}
     crash_enabled = bool(crash_cfg.get("enabled", True))
     crash = pd.Series(False, index=prices.index)
@@ -29,53 +42,35 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         crash = (r <= thr).fillna(False)
 
     fast = (crash_cfg.get("fast", {}) or {})
-    if crash_enabled and bool(fast.get("enabled", False)):
+    fast_enabled = bool(fast.get("enabled", False))
+    if crash_enabled and fast_enabled:
         flb = int(fast.get("lookback_days", 5))
         fthr = float(fast.get("threshold", -0.08))
         fr = p.pct_change(flb).shift(1)
         crash = (crash | (fr <= fthr).fillna(False))
 
-    # ---- Switches (1~3) ----
-    sw = (cfg.get("switches", {}) or {})
-    # (1) Momentum gate on SPY
-    if bool(sw.get("mom_gate", False)):
-        mom_lb = int(sw.get("mom_lookback_days", 63))
-        mom_thr = float(sw.get("mom_threshold", 0.0))
-        mom = p.pct_change(mom_lb).shift(1)
-        bull = bull & (mom > mom_thr).fillna(False)
+    # ---- HOLD FILTER (legacy) ----
+    if min_hold > 0:
+        bull = _min_hold_filter(bull, min_hold)
 
-    # (3) Breadth gate (RSP/SPY)
-    if bool(sw.get("breadth_gate", False)):
-        rsp = str(sw.get("breadth_ticker", "RSP"))
-        if rsp not in prices.columns:
-            raise ValueError(f"breadth_gate enabled but '{rsp}' not in prices columns. Add to data.tickers.")
-        lb = int(sw.get("breadth_lookback_days", 63))
-        rel = (prices[rsp].astype(float) / p.astype(float)).pct_change(lb).shift(1)
-        # if relative momentum negative -> suppress BULL
-        bull = bull & (rel > 0.0).fillna(False)
+    # ---- BEAR FAST (apply AFTER hold; force immediate exit) ----
+    bear_fast_cfg = (cfg.get("bear_fast", {}) or {})
+    bear_fast_enabled = bool(bear_fast_cfg.get("enabled", False))
+    bear_fast = pd.Series(False, index=prices.index)
 
-    # base state assignment (no hold/cooldown yet)
+    if bear_fast_enabled:
+        blb = int(bear_fast_cfg.get("lookback_days", 10))
+        bthr = float(bear_fast_cfg.get("threshold", -0.06))
+        br = p.pct_change(blb).shift(1)
+        bear_fast = (br <= bthr).fillna(False)
+
+        # force BULL off
+        bull = bull & (~bear_fast)
+
+    # ---- STATE ASSIGNMENT ----
     state = pd.Series("BEAR", index=prices.index)
     state.loc[bull] = "BULL"
     state.loc[crash] = "CRASH"
-
-    # (2) Cooldown after exiting BEAR/CRASH: delay BULL re-entry N days
-    if bool(sw.get("cooldown", False)):
-        cd = int(sw.get("cooldown_days", 20))
-        if cd > 0:
-            # whenever state is not BULL, reset counter; when trying to go BULL, require counter>cd
-            cooldown_ok = np.ones(len(state), dtype=bool)
-            cool = 10**9  # start large so first bull allowed
-            for i in range(len(state)):
-                if state.iat[i] != "BULL":
-                    cool = 0
-                    cooldown_ok[i] = True
-                else:
-                    cool += 1
-                    cooldown_ok[i] = (cool > cd)
-            # suppress BULL where cooldown not satisfied (turn into BEAR, CRASH stays CRASH)
-            suppress = (~pd.Series(cooldown_ok, index=state.index)) & (state == "BULL")
-            state.loc[suppress] = "BEAR"
 
     out = pd.DataFrame(
         {
@@ -88,7 +83,39 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     )
 
     if debug:
-        print("[STATE-DEBUG] switches:", sw)
-        print("[STATE-DEBUG] state_counts:", out["state"].value_counts(dropna=False).to_dict())
+        vc = out["state"].value_counts(dropna=False).to_dict()
+        print(f"[STATE-DEBUG] state_counts: {vc}")
+        if crash_enabled:
+            print(f"[STATE-DEBUG] crash_true={int(out['crash_flag'].sum())}")
+        if bear_fast_enabled:
+            print(f"[STATE-DEBUG] bear_fast_true={int(bear_fast.sum())}")
 
     return out
+
+
+def _min_hold_filter(bull_flag: pd.Series, min_hold_days: int) -> pd.Series:
+    """
+    Run-length enforcement:
+      once flag changes, keep previous flag for min_hold_days.
+    """
+    bull_flag = bull_flag.astype(bool).copy()
+    vals = bull_flag.values
+    if len(vals) == 0:
+        return bull_flag
+
+    out = vals.copy()
+    last = out[0]
+    hold = 0
+
+    for i in range(1, len(out)):
+        if out[i] == last:
+            hold = 0
+        else:
+            hold += 1
+            if hold <= min_hold_days:
+                out[i] = last
+            else:
+                last = out[i]
+                hold = 0
+
+    return pd.Series(out, index=bull_flag.index)
