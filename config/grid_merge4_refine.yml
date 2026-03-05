@@ -28,7 +28,7 @@ soxx_gate:
   enabled: [true, false]
   mode: ["mom"]
 
-  mom_lookback_days: [70, 80, 85, 87, 90] #87
+  mom_lookback_days: [80, 85, 87, 90] #87
 
   mom_threshold: [0.012, 0.024, 0.036, 0.048] #0.024
 
