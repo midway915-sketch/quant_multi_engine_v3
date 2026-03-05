@@ -7,7 +7,6 @@ from src.core.state import compute_state_flags
 
 
 def _risk_off_weights(mode: str) -> dict:
-    # Cash-like / short-duration
     if mode == "SHY_100":
         return {"SHY": 1.0}
     if mode == "BIL_100":
@@ -15,7 +14,6 @@ def _risk_off_weights(mode: str) -> dict:
     if mode == "SGOV_100":
         return {"SGOV_MIX": 1.0}
 
-    # Gold mixes
     if mode == "SHY_GLD_50_50":
         return {"SHY": 0.5, "GLD": 0.5}
     if mode == "SHY_70_GLD_30":
@@ -23,7 +21,6 @@ def _risk_off_weights(mode: str) -> dict:
     if mode == "GLD_100":
         return {"GLD": 1.0}
 
-    # Inverse equity (MIX = proxy pre-listing, real after listing)
     if mode == "SH_100":
         return {"SH_MIX": 1.0}
     if mode == "PSQ_100":
@@ -33,7 +30,6 @@ def _risk_off_weights(mode: str) -> dict:
 
 
 def _trend_universe_to_trade_col(ticker: str) -> str:
-    # Trend는 3x MIX
     if ticker == "QQQ":
         return "TQQQ_MIX"
     if ticker == "SPY":
@@ -44,7 +40,6 @@ def _trend_universe_to_trade_col(ticker: str) -> str:
 
 
 def _meanrev_universe_to_trade_col(ticker: str) -> str:
-    # MeanRev는 2x MIX
     if ticker == "QQQ":
         return "QLD_MIX"
     if ticker == "SPY":
@@ -69,27 +64,12 @@ def _normalize_weights(h: dict) -> dict:
     return {k: float(v / s) for k, v in h.items()}
 
 
-def _turnover_cost_frac(
-    w_prev: dict,
-    w_new: dict,
-    buy_cost: float,
-    sell_cost: float,
-) -> float:
-    """
-    Compute portfolio-level cost fraction for transitioning w_prev -> w_new.
-
-    - buy_cost applies to increases in weight (delta > 0)
-    - sell_cost applies to decreases in weight (delta < 0)
-
-    cost_frac to be applied as: equity *= (1 - cost_frac)
-    """
+def _turnover_cost_frac(w_prev: dict, w_new: dict, buy_cost: float, sell_cost: float) -> float:
     if buy_cost <= 0 and sell_cost <= 0:
         return 0.0
-
     keys = set(w_prev.keys()) | set(w_new.keys())
     buy_turn = 0.0
     sell_turn = 0.0
-
     for k in keys:
         prev = float(w_prev.get(k, 0.0))
         new = float(w_new.get(k, 0.0))
@@ -98,31 +78,11 @@ def _turnover_cost_frac(
             buy_turn += d
         elif d < 0:
             sell_turn += (-d)
-
     cost_frac = buy_turn * float(buy_cost) + sell_turn * float(sell_cost)
-    if cost_frac < 0:
-        cost_frac = 0.0
-    return float(cost_frac)
+    return float(max(cost_frac, 0.0))
 
 
 def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
-    """
-    Lookahead-free:
-      - Today's return uses yesterday's confirmed holdings
-      - Signals/picks computed at date dt are applied starting next trading day
-
-    Transaction costs:
-      - Applied on rebalance dates ONLY (dt in reb_dates)
-      - Charged after today's return is applied (models execution at dt close)
-      - Cost is proportional to turnover between current holdings and desired holdings
-
-    Returns:
-      equity: pd.Series
-      engine_choice_log: list[dict]
-      picks_top2_weekly: pd.DataFrame
-      holdings_daily: pd.DataFrame  (date,ticker,weight,state)
-      holdings_weekly: pd.DataFrame (week_end,ticker,avg_weight,week_ret,contrib)
-    """
     prices = prices.copy()
     returns = prices.pct_change().fillna(0.0)
 
@@ -137,7 +97,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     port_cfg = cfg.get("portfolio", {}) or {}
     reb_mode = str(port_cfg.get("rebalance", "weekly")).lower().strip()
     when_mode = str(port_cfg.get("when", "week_end")).lower().strip()
-    entry_mode = str(port_cfg.get("entry", "next_close")).lower().strip()
+    entry_mode = str(port_cfg.get("entry", "next_close")).lower().strip()  # next_open | next_close
 
     # ---- Trend config ----
     trend_cfg = cfg.get("trend_engine", {}) or {}
@@ -185,7 +145,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     else:
         reb_dates = fridays
 
-    # Weekly closes for weekly return reporting
     wclose = _weekly_close(prices)
 
     def get_week_ret(ticker_col: str, wk_end: pd.Timestamp) -> float:
@@ -208,37 +167,43 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     mr_days = 0
     mr_trade_col = None
 
-    # holdings
+    # ---- Holdings ----
     h_cur = {"SHY": 1.0}
-    h_next = h_cur.copy()
-
     equity = 1.0
     curve = []
     engine_choice_log = []
     holdings_daily_rows = []
+
+    # ✅ next_close 구현을 위한 pending apply
+    pending_apply_on: pd.Timestamp | None = None
+    pending_h: dict | None = None
+    pending_cost_frac: float = 0.0
 
     idx = prices.index
 
     for i, dt in enumerate(idx):
         st = state_df.loc[dt, "state"]
 
-        # 1) apply today's return with h_cur
+        # 1) APPLY TODAY RETURN USING h_cur
         for t, w in h_cur.items():
-            holdings_daily_rows.append({
-                "date": str(dt.date()),
-                "ticker": t,
-                "weight": float(w),
-                "state": st
-            })
+            holdings_daily_rows.append({"date": str(dt.date()), "ticker": t, "weight": float(w), "state": st})
 
         daily_ret = 0.0
         for t, w in h_cur.items():
             if t in returns.columns:
                 daily_ret += float(returns.loc[dt, t]) * float(w)
-
         equity *= (1.0 + daily_ret)
 
-        # 2) signals / desired holdings for tomorrow
+        # 1.5) ✅ if next_close pending is due TODAY, apply cost + switch holdings AFTER today's return
+        if pending_apply_on is not None and dt == pending_apply_on and pending_h is not None:
+            if pending_cost_frac > 0:
+                equity *= (1.0 - pending_cost_frac)
+            h_cur = pending_h
+            pending_apply_on = None
+            pending_h = None
+            pending_cost_frac = 0.0
+
+        # 2) COMPUTE SIGNALS / DESIRED HOLDINGS (target weights)
         if dt in reb_dates:
             m = mom.loc[dt, candidates] if all([c in mom.columns for c in candidates]) else mom.loc[dt].reindex(candidates)
             ranked = m.dropna().sort_values(ascending=False)
@@ -267,7 +232,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             row["rank2_week_ret"] = get_week_ret(row["rank2_trade"], wk) if row["rank2_trade"] else np.nan
             picks_rows.append(row)
 
-        # meanrev decisions (unchanged)
+        # MeanRev decisions (unchanged)
         mr_price_under = prices[mr_base] if mr_base in prices.columns else None
         if mr_price_under is None or mr_price_under.isna().all():
             mr_active = False
@@ -276,7 +241,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             mr_days = 0
         else:
             r_lb = mr_price_under.pct_change(mr_lb).shift(1).loc[dt]
-
             if (not mr_active) and pd.notna(r_lb) and (float(r_lb) <= mr_drop):
                 mr_active = True
                 mr_trade_col = _meanrev_universe_to_trade_col(mr_base)
@@ -299,7 +263,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                         mr_entry_price = None
                         mr_days = 0
 
-        # desired holdings
         st_key = st.lower()
         w_tr = float(alloc[st_key]["trend"])
         w_mr = float(alloc[st_key]["meanrev"])
@@ -307,7 +270,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         df_w = _risk_off_weights(risk_off_mode)
 
         h_des = {}
-
         if w_tr > 0 and len(current_trend_tradecols) > 0:
             per = w_tr / len(current_trend_tradecols)
             for tcol in current_trend_tradecols:
@@ -327,18 +289,27 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         if not h_des:
             h_des = {"SHY": 1.0}
 
-        # ✅ COST: apply on rebalance dates when we actually transition weights
-        if dt in reb_dates:
-            cost_frac = _turnover_cost_frac(h_cur, h_des, buy_cost=buy_cost, sell_cost=sell_cost)
-            if cost_frac > 0:
-                equity *= (1.0 - cost_frac)
+        # 3) EXECUTION MODEL
+        # - next_open: apply tomorrow (what you previously had)
+        # - next_close: trade executes at next day's close -> holdings switch after next day return
+        # Costs are applied at execution moment.
+        if i < len(idx) - 1:
+            if entry_mode == "next_close":
+                # schedule application on next trading day (dt+1) AFTER return
+                apply_on = idx[i + 1]
+                cost_frac = _turnover_cost_frac(h_cur, h_des, buy_cost=buy_cost, sell_cost=sell_cost)
+                pending_apply_on = apply_on
+                pending_h = h_des
+                pending_cost_frac = cost_frac
+            else:
+                # next_open / default: apply immediately for tomorrow, and cost at dt close
+                if dt in reb_dates:
+                    cost_frac = _turnover_cost_frac(h_cur, h_des, buy_cost=buy_cost, sell_cost=sell_cost)
+                    if cost_frac > 0:
+                        equity *= (1.0 - cost_frac)
+                h_cur = h_des
 
         curve.append(equity)
-
-        # commit tomorrow holdings
-        if i < len(idx) - 1:
-            h_next = h_des
-            h_cur = h_next
 
         engine_choice_log.append({
             "date": str(dt.date()),
@@ -350,6 +321,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             "meanrev_ticker": mr_trade_col if mr_active else "",
             "rebalance_today": bool(dt in reb_dates),
             "rebalance_mode": reb_mode,
+            "entry_mode": entry_mode,
             "buy_cost": buy_cost,
             "sell_cost": sell_cost,
         })
