@@ -26,9 +26,9 @@ bear_fast:
 soxx_gate:
   enabled: [false, true]
   mode: ["mom", "ma"]
-  mom_lookback_days: [20]
+  mom_lookback_days: [10, 20, 30]
   mom_threshold: [0.0]   # 20일 모멘텀 > 0이면 허용
-  ma_days: [50]          # mode=ma로 바꿀 때만 사용
+  ma_days: [40, 50, 60]          # mode=ma로 바꿀 때만 사용
 
 risk_off:
   mode: ["SGOV_100"]
