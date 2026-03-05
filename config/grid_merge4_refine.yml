@@ -1,5 +1,5 @@
-
-# crash.fast / bear_fast ON-OFF를 같은 그리드에서 비교
+# config/grid_merge4_on_3200.yml
+# merge4 (both ON) wide sweep: total combos = 3200
 
 data:
   prices_start: ["2000-01-01"]
@@ -15,14 +15,13 @@ crash:
   threshold: [-0.10]
   fast:
     enabled: [true]
-    # enabled=false여도 값은 붙지만 코드에서 무시됨
-    lookback_days: [2, 3, 4, 5, 6, 7, 8, 9]
-    threshold: [-0.05, -0.055, -0.06, -0.065, -0.07]
+    lookback_days: [2,3,4,5,6,7,8,9,10,12]
+    threshold: [-0.045,-0.05,-0.055,-0.06,-0.065,-0.07,-0.075,-0.08,-0.085,-0.09]
 
 bear_fast:
   enabled: [true]
-  lookback_days: [2, 3, 4, 5, 6, 7, 8, 9]
-  threshold: [-0.04, -0.045, -0.05, -0.055, -0.06]
+  lookback_days: [2,3,4,5,6,7,8,10]
+  threshold: [-0.04,-0.045,-0.05,-0.06]
 
 risk_off:
   mode: ["SGOV_100"]
