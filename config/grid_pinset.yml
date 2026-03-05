@@ -1,18 +1,14 @@
-# config/grid_pinset.yml
-# Pinset grid: FAST_CRASH + reentry-only hold
-
+# config/grid_pinset3.yml
 data:
   prices_start: ["2000-01-01"]
 
-# ✅ state: reentry-only hold 테스트
 state:
   base_ticker: ["SPY"]
   ma_days: [150]
-  min_hold_days: [11]          # legacy (hold_mode=both일 때 사용)
+  min_hold_days: [11]
   hold_mode: ["both", "reentry"]
-  reentry_hold_days: [0, 1, 2, 3]  # hold_mode=reentry일 때만 의미 있음
+  reentry_hold_days: [0, 1, 2]
 
-# ✅ crash: 기존 12일 -10% 유지 + FAST_CRASH 추가 스캔
 crash:
   enabled: [true]
   lookback_days: [12]
@@ -20,7 +16,13 @@ crash:
   fast:
     enabled: [true]
     lookback_days: [3, 4, 5]
-    threshold: [-0.06, -0.07, -0.08, -0.09, -0.10]
+    threshold: [-0.07, -0.08, -0.09, -0.10]
+
+# ✅ NEW: bear_fast
+bear_fast:
+  enabled: [true]
+  lookback_days: [5, 10]
+  threshold: [-0.05, -0.06, -0.07]
 
 risk_off:
   mode: ["SGOV_100"]
@@ -32,7 +34,6 @@ trend_engine:
   top_n: [1]
 
 meanrev_engine:
-  # 네 운영 기준대로 0으로 두고 고정(원하면 나중에 다시 스캔)
   lookback_days: [20]
   drop_threshold: [-0.10]
   hold_days: [5]
@@ -43,17 +44,6 @@ meanrev_engine:
   base: ["SPY"]
 
 allocator:
-  bull:
-    trend: [1.00]
-    meanrev: [0.00]
-    defensive: [0.00]
-
-  bear:
-    trend: [0.00]
-    meanrev: [0.00]
-    defensive: [1.00]
-
-  crash:
-    trend: [0.00]
-    meanrev: [0.00]
-    defensive: [1.00]
+  bull:   {trend: [1.00], meanrev: [0.00], defensive: [0.00]}
+  bear:   {trend: [0.00], meanrev: [0.00], defensive: [1.00]}
+  crash:  {trend: [0.00], meanrev: [0.00], defensive: [1.00]}
