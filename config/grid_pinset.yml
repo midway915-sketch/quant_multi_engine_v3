@@ -1,0 +1,59 @@
+# config/grid_pinset.yml
+# Pinset grid: FAST_CRASH + reentry-only hold
+
+data:
+  prices_start: ["2000-01-01"]
+
+# ✅ state: reentry-only hold 테스트
+state:
+  base_ticker: ["SPY"]
+  ma_days: [150]
+  min_hold_days: [11]          # legacy (hold_mode=both일 때 사용)
+  hold_mode: ["both", "reentry"]
+  reentry_hold_days: [0, 3, 5, 7]  # hold_mode=reentry일 때만 의미 있음
+
+# ✅ crash: 기존 12일 -10% 유지 + FAST_CRASH 추가 스캔
+crash:
+  enabled: [true]
+  lookback_days: [12]
+  threshold: [-0.10]
+  fast:
+    enabled: [true]
+    lookback_days: [5]
+    threshold: [-0.08, -0.10]
+
+risk_off:
+  mode: ["SGOV_100"]
+
+trend_engine:
+  mom_lookback_days: [126]
+  candidates:
+    - ["QQQ", "SPY", "SOXX"]
+  top_n: [1]
+
+meanrev_engine:
+  # 네 운영 기준대로 0으로 두고 고정(원하면 나중에 다시 스캔)
+  lookback_days: [20]
+  drop_threshold: [-0.10]
+  hold_days: [5]
+  take_profit: [0.06]
+  stop_loss: [-0.06]
+  candidates:
+    - ["QQQ", "SPY", "SOXX"]
+  base: ["SPY"]
+
+allocator:
+  bull:
+    trend: [1.00]
+    meanrev: [0.00]
+    defensive: [0.00]
+
+  bear:
+    trend: [0.00]
+    meanrev: [0.00]
+    defensive: [1.00]
+
+  crash:
+    trend: [0.00]
+    meanrev: [0.00]
+    defensive: [1.00]
