@@ -9,12 +9,11 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     Look-ahead prevention: signals use shift(1)
 
     Features:
-      - crash: main (lb,thr) + optional fast (short lb,thr)
-      - hold_mode:
-          * "both": legacy min_hold applies to BOTH exit/reentry (run-length)
-          * "reentry": delay ONLY BULL re-entry (exit fast)
-      - bear_fast: optional short-lookback BEAR trigger
-          * IMPORTANT: applied AFTER hold filter so it can force immediate exit
+      - crash: main + optional fast
+      - hold_mode: "both" | "reentry"
+      - bear_fast: short-lookback BEAR trigger (applied AFTER hold -> can force exit)
+      - bond_gate (C안):
+          if (weak_spy OR bear_fast) AND (bond_mom < 0) -> force BULL off (BEAR)
     """
     debug = bool(cfg.get("debug", {}).get("state", False))
 
@@ -35,6 +34,9 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     bull_raw = (p > ma)
     bull = bull_raw.shift(1).fillna(False)
 
+    # Weak-SPY gate signal (lookahead-safe): today uses yesterday's known condition
+    weak_spy = (~bull_raw).shift(1).fillna(False)
+
     # ---- CRASH (main + fast) ----
     crash_cfg = cfg.get("crash", {}) or {}
     crash_enabled = bool(crash_cfg.get("enabled", True))
@@ -54,7 +56,7 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         fr = p.pct_change(flb).shift(1)
         crash = (crash | (fr <= fthr).fillna(False))
 
-    # ---- HOLD FILTER (apply BEFORE bear_fast) ----
+    # ---- HOLD FILTER (apply BEFORE bear_fast/bond_gate) ----
     if hold_mode == "both":
         if min_hold > 0:
             bull = _min_hold_filter(bull, min_hold)
@@ -62,7 +64,7 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         if reentry_hold > 0:
             bull = _reentry_hold_filter(bull, reentry_hold)
 
-    # ---- BEAR FAST (apply AFTER hold filter; can force immediate exit) ----
+    # ---- BEAR FAST (apply AFTER hold filter; force immediate exit) ----
     bear_fast_cfg = (cfg.get("bear_fast", {}) or {})
     bear_fast_enabled = bool(bear_fast_cfg.get("enabled", False))
     bear_fast = pd.Series(False, index=prices.index)
@@ -71,14 +73,34 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
         bthr = float(bear_fast_cfg.get("threshold", -0.06))
         br = p.pct_change(blb).shift(1)
         bear_fast = (br <= bthr).fillna(False)
-
-        # force BULL off when bear_fast triggers
         bull = bull & (~bear_fast)
+
+    # ---- BOND GATE (C안) ----
+    # if (weak_spy OR bear_fast) AND (bond_mom < 0) -> force bull off
+    bond_gate_cfg = (cfg.get("bond_gate", {}) or {})
+    bond_gate_enabled = bool(bond_gate_cfg.get("enabled", False))
+    if bond_gate_enabled:
+        bond_ticker = str(bond_gate_cfg.get("ticker", "TLT"))
+        if bond_ticker not in prices.columns:
+            raise ValueError(f"bond_gate.ticker '{bond_ticker}' not in prices columns. "
+                             f"Add it to data.tickers. Available={list(prices.columns)}")
+
+        bond_lb = int(bond_gate_cfg.get("lookback_days", 63))
+        bond_thr = float(bond_gate_cfg.get("threshold", 0.0))  # default: mom < 0
+        bond_mom = prices[bond_ticker].astype(float).pct_change(bond_lb).shift(1)
+        bond_bad = (bond_mom < bond_thr).fillna(False)
+
+        gate_on = (bond_bad & (weak_spy | bear_fast))
+        bull = bull & (~gate_on)
+
+        if debug:
+            print(f"[STATE-DEBUG] bond_gate enabled: ticker={bond_ticker} lb={bond_lb} thr={bond_thr} "
+                  f"bond_bad_true={int(bond_bad.sum())} gate_on_true={int(gate_on.sum())}")
 
     # ---- STATE ASSIGNMENT ----
     state = pd.Series("BEAR", index=prices.index)
     state.loc[bull] = "BULL"
-    state.loc[crash] = "CRASH"
+    state.loc[crash] = "CRASH"  # override
 
     out = pd.DataFrame(
         {
@@ -93,19 +115,11 @@ def compute_state_flags(prices: pd.DataFrame, cfg: dict) -> pd.DataFrame:
     if debug:
         vc = out["state"].value_counts(dropna=False).to_dict()
         print(f"[STATE-DEBUG] state_counts: {vc}")
-        if bear_fast_enabled:
-            print(f"[STATE-DEBUG] bear_fast_true={int(bear_fast.sum())}")
-        if crash_enabled:
-            print(f"[STATE-DEBUG] crash_true={int(out['crash_flag'].sum())}")
 
     return out
 
 
 def _min_hold_filter(bull_flag: pd.Series, min_hold_days: int) -> pd.Series:
-    """
-    Legacy run-length enforcement:
-      once flag changes, keep previous flag for min_hold_days.
-    """
     bull_flag = bull_flag.astype(bool).copy()
     vals = bull_flag.values
     if len(vals) == 0:
@@ -130,11 +144,6 @@ def _min_hold_filter(bull_flag: pd.Series, min_hold_days: int) -> pd.Series:
 
 
 def _reentry_hold_filter(bull_flag: pd.Series, reentry_hold_days: int) -> pd.Series:
-    """
-    Delay ONLY BULL re-entry:
-      - False->True requires consecutive True for (reentry_hold_days+1) days.
-      - True->False happens immediately.
-    """
     bull_flag = bull_flag.astype(bool).copy()
     vals = bull_flag.values
     if len(vals) == 0:
