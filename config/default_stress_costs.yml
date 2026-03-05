@@ -1,8 +1,5 @@
-# config/default_stress_biweekly.yml
-# 기존 default_stress_costs.yml 복사 + 리밸런스만 biweekly
-
 data:
-  tickers: ["SPY","QQQ","SOXX","SGOV","SHY"]
+  tickers: ["SPY","QQQ","SOXX","SHY"]
   start: "2000-01-01"
   price_field: "close"
 
