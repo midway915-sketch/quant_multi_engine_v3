@@ -1,7 +1,7 @@
 data:
   tickers: ["SPY","QQQ","SOXX","SHY"]
   start: "2000-01-01"
-  price_field: "adj_close"
+  price_field: "close" #adj_close
 
 portfolio:
   rebalance: "monthly"
