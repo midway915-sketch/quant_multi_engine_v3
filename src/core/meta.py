@@ -29,7 +29,33 @@ def _risk_off_weights(mode: str) -> dict:
     return {"SHY": 1.0}
 
 
-def _trend_universe_to_trade_col(ticker: str) -> str:
+def _trend_trade_col(ticker: str, leverage_mode: str) -> str:
+    """
+    Trend 매매 컬럼 매핑:
+      - 1x : QQQ/SPY/SOXX 그대로
+      - 2x : QLD_MIX / SSO_MIX / USD_MIX
+      - 3x : TQQQ_MIX / UPRO_MIX / SOXL_MIX
+
+    leverage_mode 호환:
+      - "1x", "spot", "cash" -> 1x
+      - "2x", "proxy_2x", "mix_2x" -> 2x
+      - "3x", "proxy_3x", "mix_3x" -> 3x (기존 기본)
+    """
+    m = (leverage_mode or "3x").lower().strip()
+
+    if m in ("1x", "spot", "cash", "unlevered"):
+        return ticker
+
+    if m in ("2x", "proxy_2x", "mix_2x", "lever_2x"):
+        if ticker == "QQQ":
+            return "QLD_MIX"
+        if ticker == "SPY":
+            return "SSO_MIX"
+        if ticker == "SOXX":
+            return "USD_MIX"
+        return ticker
+
+    # default: 3x
     if ticker == "QQQ":
         return "TQQQ_MIX"
     if ticker == "SPY":
@@ -40,6 +66,7 @@ def _trend_universe_to_trade_col(ticker: str) -> str:
 
 
 def _meanrev_universe_to_trade_col(ticker: str) -> str:
+    # MeanRev는 2x MIX (기존 유지)
     if ticker == "QQQ":
         return "QLD_MIX"
     if ticker == "SPY":
@@ -65,12 +92,6 @@ def _normalize_weights(h: dict) -> dict:
 
 
 def _turnover_cost_frac(w_prev: dict, w_new: dict, buy_cost: float, sell_cost: float) -> float:
-    """
-    Portfolio-level cost fraction for transitioning w_prev -> w_new.
-    Costs are applied on notional traded at rebalance close:
-      - buy_cost on increases (delta>0)
-      - sell_cost on decreases (delta<0)
-    """
     buy_cost = float(buy_cost)
     sell_cost = float(sell_cost)
     if buy_cost <= 0 and sell_cost <= 0:
@@ -97,18 +118,7 @@ def _turnover_cost_frac(w_prev: dict, w_new: dict, buy_cost: float, sell_cost: f
 
 def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     """
-    Lookahead-free:
-      - Today's return uses yesterday's confirmed holdings
-      - Signals/picks computed at date dt are applied starting next trading day
-
-    + 거래비용 적용:
-      - dt에서 h_cur(오늘 보유)로 수익률 반영 후,
-      - dt에서 계산한 h_des(내일 보유)로 바꿀 때(= dt close 체결 가정),
-        turnover 기반 비용을 equity에 차감 (equity *= (1 - cost_frac))
-
-    + SOXX gate:
-      - if Top1 is SOXX, allow only when condition holds (mom/ma; shift(1))
-      - otherwise drop SOXX and pick next best (QQQ/SPY)
+    Lookahead-free + 거래비용 적용 + SOXX gate + Trend 레버리지(1x/2x/3x) 스캔 지원
     """
     prices = prices.copy()
     returns = prices.pct_change().fillna(0.0)
@@ -132,12 +142,12 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     if len(candidates) == 1 and isinstance(candidates[0], list):
         candidates = candidates[0]
 
-    sel_cfg = cfg.get("selection", {}) or {}
-    top_n = int(sel_cfg.get("top_n", trend_cfg.get("top_n", 1)))
+    top_n = int(trend_cfg.get("top_n", 1))
+    trend_leverage_mode = str(trend_cfg.get("leverage_mode", "proxy_3x"))
 
     mom = prices.pct_change(mom_lb)
 
-    # ---- MeanRev config (allocator가 0이어도 보존) ----
+    # ---- MeanRev config (kept) ----
     mr_cfg = cfg.get("meanrev_engine", {}) or {}
     mr_lb = int(mr_cfg.get("lookback_days", 20))
     mr_drop = float(mr_cfg.get("drop_threshold", -0.12))
@@ -168,7 +178,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     soxx_gate_ma_days = int(soxx_gate.get("ma_days", 50))
 
     def soxx_allowed(dt: pd.Timestamp) -> tuple[bool, float]:
-        # lookahead-safe: shift(1)
         if "SOXX" not in prices.columns:
             return (False, float("nan"))
         s = prices["SOXX"].astype(float)
@@ -230,7 +239,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     mr_days = 0
     mr_trade_col = None
 
-    # --- Holdings (lookahead-free) ---
+    # --- Holdings ---
     h_cur = {"SHY": 1.0}
     equity = 1.0
     curve = []
@@ -242,7 +251,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     for i, dt in enumerate(idx):
         st = state_df.loc[dt, "state"]
 
-        # 1) APPLY TODAY'S RETURN USING h_cur
+        # 1) today return using h_cur
         for t, w in h_cur.items():
             holdings_daily_rows.append({"date": str(dt.date()), "ticker": t, "weight": float(w), "state": st})
 
@@ -253,10 +262,9 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
 
         equity *= (1.0 + daily_ret)
 
-        # 2) COMPUTE SIGNALS / desired holdings for TOMORROW
+        # 2) signals -> h_des for tomorrow
         rebalance_today = bool(dt in reb_dates)
 
-        # (a) Trend picks updated ONLY on rebalance dates
         soxx_gate_applied = False
         soxx_gate_blocked = False
         soxx_gate_value = float("nan")
@@ -264,7 +272,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         if rebalance_today:
             m = mom.loc[dt].reindex(candidates)
             ranked = m.dropna().sort_values(ascending=False)
-
             top = list(ranked.index[:top_n]) if not ranked.empty else []
 
             if soxx_gate_enabled and len(top) > 0 and top[0] == "SOXX":
@@ -276,7 +283,8 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                     ranked2 = ranked.drop(index=["SOXX"], errors="ignore")
                     top = list(ranked2.index[:top_n])
 
-            current_trend_tradecols = [_trend_universe_to_trade_col(t) for t in top if t is not None]
+            # ✅ 여기서 leverage_mode에 따라 실제 매매 컬럼 결정
+            current_trend_tradecols = [_trend_trade_col(t, trend_leverage_mode) for t in top if t is not None]
 
             wk = _week_end_index(pd.DatetimeIndex([dt]))[0]
             top1 = top[0] if len(top) > 0 else None
@@ -286,12 +294,13 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                 "week_end": str(wk.date()),
                 "rank1": top1,
                 "rank2": top2,
-                "rank1_trade": _trend_universe_to_trade_col(top1) if top1 else None,
-                "rank2_trade": _trend_universe_to_trade_col(top2) if top2 else None,
+                "rank1_trade": _trend_trade_col(top1, trend_leverage_mode) if top1 else None,
+                "rank2_trade": _trend_trade_col(top2, trend_leverage_mode) if top2 else None,
                 "score1_mom": float(ranked.loc[top1]) if (top1 in ranked.index) else np.nan,
                 "score2_mom": float(ranked.loc[top2]) if (top2 in ranked.index) else np.nan,
                 "rebalance_mode": reb_mode,
                 "rebalance_today": True,
+                "trend_leverage_mode": trend_leverage_mode,
                 "soxx_gate_enabled": bool(soxx_gate_enabled),
                 "soxx_gate_applied": bool(soxx_gate_applied),
                 "soxx_gate_blocked": bool(soxx_gate_blocked),
@@ -302,7 +311,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             row["rank2_week_ret"] = get_week_ret(row["rank2_trade"], wk) if row["rank2_trade"] else np.nan
             picks_rows.append(row)
 
-        # (b) MeanRev (daily)
+        # meanrev (kept)
         mr_price_under = prices[mr_base] if mr_base in prices.columns else None
         if mr_price_under is None or mr_price_under.isna().all():
             mr_active = False
@@ -311,7 +320,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             mr_days = 0
         else:
             r_lb = mr_price_under.pct_change(mr_lb).shift(1).loc[dt]
-
             if (not mr_active) and pd.notna(r_lb) and (float(r_lb) <= mr_drop):
                 mr_active = True
                 mr_trade_col = _meanrev_universe_to_trade_col(mr_base)
@@ -334,7 +342,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                         mr_entry_price = None
                         mr_days = 0
 
-        # (c) Build desired holdings for TOMORROW
+        # build h_des
         st_key = st.lower()
         w_tr = float(alloc[st_key]["trend"])
         w_mr = float(alloc[st_key]["meanrev"])
@@ -361,17 +369,16 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         if not h_des:
             h_des = {"SHY": 1.0}
 
-        # 2.5) APPLY TURNOVER COST (dt close) AND COMMIT TOMORROW HOLDINGS
-        traded = False
-        turnover = 0.0
+        # turnover 비용 차감 + 내일 보유로 커밋
+        turnover_sum_abs = 0.0
         cost_frac = 0.0
+        traded = False
 
         if i < len(idx) - 1:
             keys = set(h_cur.keys()) | set(h_des.keys())
             for k in keys:
-                turnover += abs(float(h_des.get(k, 0.0)) - float(h_cur.get(k, 0.0)))
-            # turnover is sum |Δw|, one-way turnover is turnover/2
-            traded = turnover > 1e-12
+                turnover_sum_abs += abs(float(h_des.get(k, 0.0)) - float(h_cur.get(k, 0.0)))
+            traded = turnover_sum_abs > 1e-12
 
             cost_frac = _turnover_cost_frac(h_cur, h_des, buy_cost, sell_cost)
             if cost_frac > 0:
@@ -379,7 +386,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
 
             h_cur = h_des
 
-        # append end-of-day equity AFTER costs
         curve.append(equity)
 
         engine_choice_log.append(
@@ -393,8 +399,9 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                 "meanrev_ticker": mr_trade_col if mr_active else "",
                 "rebalance_today": bool(rebalance_today),
                 "rebalance_mode": reb_mode,
-                "turnover_sum_abs": float(turnover),
-                "turnover_one_way": float(turnover) * 0.5,
+                "trend_leverage_mode": trend_leverage_mode,
+                "turnover_sum_abs": float(turnover_sum_abs),
+                "turnover_one_way": float(turnover_sum_abs) * 0.5,
                 "cost_buy": float(buy_cost),
                 "cost_sell": float(sell_cost),
                 "cost_frac": float(cost_frac),
@@ -417,6 +424,8 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         wk_avg = wk_avg[wk_avg["avg_weight"] > 0]
     else:
         wk_avg = pd.DataFrame(columns=["week_end", "ticker", "avg_weight"])
+
+    wclose = _weekly_close(prices)
 
     def wk_ret_col(ticker: str, wk_end_ts: pd.Timestamp) -> float:
         if ticker not in wclose.columns or wk_end_ts not in wclose.index:
