@@ -289,6 +289,34 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         soxx_gate_applied = False
         soxx_gate_blocked = False
         soxx_gate_value = float("nan")
+        # --- holding-dependent asset crash override (applies to tomorrow holdings) ---
+        asset_crash_hit = False
+        asset_crash_under = ""
+        
+        if asset_crash_enabled:
+            # 오늘 보유(h_cur) 중에 레버리지 자산이 있으면 그에 해당하는 underlying을 본다
+            held = list(h_cur.keys())
+            for trade_col in held:
+                under = asset_crash_map.get(trade_col, "")
+                if not under:
+                    continue
+                s = _under_rets.get(under)
+                if s is None:
+                    continue
+                v = s.loc[dt]
+                if pd.notna(v) and float(v) <= asset_crash_thr:
+                    asset_crash_hit = True
+                    asset_crash_under = under
+                    break
+        
+        # asset crash가 hit이면, "내일" 목표는 SGOV 100%로 강제
+        if asset_crash_hit:
+            # 여기서는 state를 덮어써서 기록만 남김(선택)
+            st_key = "crash"
+            w_tr = 0.0
+            w_mr = 0.0
+            w_df = 1.0
+
 
         if rebalance_today:
             m = mom.loc[dt].reindex(candidates)
