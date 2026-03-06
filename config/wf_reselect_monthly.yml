@@ -1,0 +1,16 @@
+# config/wf_reselect_monthly.yml
+
+wf:
+  train_years: 10          # 최근 10년으로 재선정
+  test_months: 1           # 다음 1개월 OOS 운용
+  warmup_days: 900         # 지표 계산용 워밍업(약 2.5년)
+
+filters:
+  mdd_min: -0.65                  # Train MDD가 -65%보다 더 나쁘면 제외
+  max_recovery_years_max: 3.0     # Train 최장 회복기간 3년 초과면 제외
+
+selection:
+  # "cagr_then_dd_then_rec" 추천: CAGR 우선 + MDD 덜 나쁜 것 + 회복기간 짧은 것
+  score_mode: "cagr_then_dd_then_rec"
+  dd_weight: 0.5        # cagr_minus_dd 모드에서만 사용
+  top_k: 5              # 매달 top-k 후보 CSV 저장(디버그/분석용)
