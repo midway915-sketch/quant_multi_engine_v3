@@ -1,6 +1,4 @@
-# config/grid_soxx_gate_mom_3600.yml
-# soxx_gate (mom only) 60x60 = 3600 combos
-# 비용 반영된 meta.py로 다시 최적값 찾기용
+
 
 data:
   prices_start: ["2000-01-01"]
@@ -38,7 +36,7 @@ risk_off:
 trend_engine:
   mom_lookback_days: [126]
   candidates:
-    - ["QQQ","SPY"]
+    - ["QQQ","SPY","SOXX"]
   top_n: [1]
   leverage_mode: ["proxy_3x"] # "1x", "2x", "proxy_3x"
 
