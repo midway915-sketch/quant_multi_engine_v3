@@ -1,0 +1,33 @@
+# config/grid_fixed_candidates_ABC_combos.yml
+# A/B/C 후보 3개만 "정확히" 돌리기 (combos 방식)
+
+combos:
+  # A (e50d313804)
+  - crash:
+      fast: {enabled: true, lookback_days: 6, threshold: -0.06}
+    bear_fast: {enabled: true, lookback_days: 3, threshold: -0.045}
+    soxx_gate: {enabled: true, mode: "mom", mom_lookback_days: 80, mom_threshold: 0.012}
+    allocator:
+      bull:  {trend: 1.00, meanrev: 0.00, defensive: 0.00}
+      bear:  {trend: 0.00, meanrev: 0.00, defensive: 1.00}
+      crash: {trend: 0.00, meanrev: 0.00, defensive: 1.00}
+
+  # B (00deb9a662)
+  - crash:
+      fast: {enabled: true, lookback_days: 6, threshold: -0.06}
+    bear_fast: {enabled: true, lookback_days: 3, threshold: -0.045}
+    soxx_gate: {enabled: true, mode: "mom", mom_lookback_days: 90, mom_threshold: 0.048}
+    allocator:
+      bull:  {trend: 1.00, meanrev: 0.00, defensive: 0.00}
+      bear:  {trend: 0.00, meanrev: 0.00, defensive: 1.00}
+      crash: {trend: 0.00, meanrev: 0.00, defensive: 1.00}
+
+  # C (a156cae577)
+  - crash:
+      fast: {enabled: true, lookback_days: 6, threshold: -0.06}
+    bear_fast: {enabled: true, lookback_days: 4, threshold: -0.045}
+    soxx_gate: {enabled: true, mode: "mom", mom_lookback_days: 87, mom_threshold: 0.024}
+    allocator:
+      bull:  {trend: 1.00, meanrev: 0.00, defensive: 0.00}
+      bear:  {trend: 0.00, meanrev: 0.00, defensive: 1.00}
+      crash: {trend: 0.00, meanrev: 0.00, defensive: 1.00}
