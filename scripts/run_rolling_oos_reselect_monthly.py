@@ -5,6 +5,7 @@ import argparse
 import json
 import math
 import os
+import time
 from dataclasses import dataclass
 from itertools import product
 from typing import Any, Dict, List, Tuple, Optional
@@ -17,8 +18,16 @@ from src.core.meta import run_meta_portfolio
 from src.core.metrics import compute_metrics
 
 
+# -------------------------
+# helpers
+# -------------------------
 def ensure_dir(path: str) -> None:
     os.makedirs(path, exist_ok=True)
+
+
+def load_yaml(path: str) -> dict:
+    with open(path, "r", encoding="utf-8") as f:
+        return yaml.safe_load(f)
 
 
 def deep_set(d: dict, key_path: str, value: Any) -> None:
@@ -85,6 +94,15 @@ def flatten_dict(d: Any, prefix: str = "") -> Dict[str, Any]:
     return out
 
 
+def rebase(eq: pd.Series) -> pd.Series:
+    if eq is None or eq.empty:
+        return eq
+    base = float(eq.iloc[0])
+    if base <= 0 or pd.isna(base):
+        return eq
+    return eq / base
+
+
 def max_recovery_days(eq: pd.Series) -> Tuple[float, float]:
     """
     Max time-to-recover (peak -> first time equity exceeds that peak again).
@@ -129,15 +147,6 @@ def max_recovery_days(eq: pd.Series) -> Tuple[float, float]:
     return (max_days, max_days / 365.25)
 
 
-def rebase(eq: pd.Series) -> pd.Series:
-    if eq.empty:
-        return eq
-    base = float(eq.iloc[0])
-    if base <= 0 or pd.isna(base):
-        return eq
-    return eq / base
-
-
 def slice_with_warmup(prices: pd.DataFrame, start: pd.Timestamp, end: pd.Timestamp, warmup_days: int) -> pd.DataFrame:
     """
     Include a warmup window before start for indicators, but keep data up to end.
@@ -148,34 +157,11 @@ def slice_with_warmup(prices: pd.DataFrame, start: pd.Timestamp, end: pd.Timesta
     return px
 
 
-def run_window(prices: pd.DataFrame, cfg: dict, start: pd.Timestamp, end: pd.Timestamp, warmup_days: int) -> Tuple[pd.Series, dict]:
-    """
-    Run strategy on [warmup..end], then return equity segment restricted to [start..end], rebased to 1.
-    Also returns metrics dict for that segment + max_recovery.
-    """
-    px = slice_with_warmup(prices, start, end, warmup_days=warmup_days)
-    if px.empty:
-        return pd.Series(dtype=float), {}
-
-    eq, *_ = run_meta_portfolio(px, cfg)
-    seg = eq.loc[(eq.index >= start) & (eq.index <= end)]
-    if seg.empty:
-        return pd.Series(dtype=float), {}
-
-    seg = rebase(seg)
-    met = compute_metrics(seg)
-    rec_days, rec_years = max_recovery_days(seg)
-    met["max_recovery_days"] = float(rec_days)
-    met["max_recovery_years"] = float(rec_years)
-    return seg, met
-
-
 def month_end_trading_days(prices: pd.DataFrame) -> pd.DatetimeIndex:
     """
     Monthly rebalance dates: last trading day of each month (based on available price index).
     """
     me = prices.resample("ME").last().index
-    # ensure they exist in the actual index
     return prices.index[prices.index.isin(me)]
 
 
@@ -189,24 +175,11 @@ class WFConfig:
     filter_max_recovery_years_max: float
 
     score_mode: str  # "cagr_only" | "cagr_minus_dd" | "cagr_then_dd_then_rec"
-    score_dd_weight: float  # used if cagr_minus_dd
+    score_dd_weight: float
+    top_k: int
 
-    top_k: int  # if >1, log top candidates; selection uses rank1 anyway
-
-
-def parse_args():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--config", required=True, help="Base config (fixed params)")
-    ap.add_argument("--grid", required=True, help="Grid yml (scan params, e.g. soxx_gate)")
-    ap.add_argument("--wf", required=True, help="WF config yml")
-    ap.add_argument("--out", required=True, help="Output directory")
-    ap.add_argument("--prices-csv", default="", help="Optional prebuilt prices.csv (skip download)")
-    return ap.parse_args()
-
-
-def load_yaml(path: str) -> dict:
-    with open(path, "r", encoding="utf-8") as f:
-        return yaml.safe_load(f)
+    progress_every_steps: int
+    progress_every_candidates: int
 
 
 def load_wf_cfg(path: str) -> WFConfig:
@@ -214,6 +187,7 @@ def load_wf_cfg(path: str) -> WFConfig:
     w = obj.get("wf", {}) or {}
     sel = obj.get("selection", {}) or {}
     filt = obj.get("filters", {}) or {}
+    prog = obj.get("progress", {}) or {}
 
     return WFConfig(
         train_years=int(w.get("train_years", 10)),
@@ -224,44 +198,104 @@ def load_wf_cfg(path: str) -> WFConfig:
         score_mode=str(sel.get("score_mode", "cagr_then_dd_then_rec")).lower().strip(),
         score_dd_weight=float(sel.get("dd_weight", 0.5)),
         top_k=int(sel.get("top_k", 5)),
+        progress_every_steps=int(prog.get("every_steps", 1)),
+        progress_every_candidates=int(prog.get("every_candidates", 25)),
     )
 
 
 def rank_candidates(rows: List[dict], wf_cfg: WFConfig) -> List[dict]:
-    """
-    Rank by configured rule, with optional filtering.
-    rows must include keys: cagr, mdd, max_recovery_years
-    """
     df = pd.DataFrame(rows)
     if df.empty:
         return []
 
-    # numeric coercion
     for c in ["cagr", "mdd", "max_recovery_years"]:
         if c in df.columns:
             df[c] = pd.to_numeric(df[c], errors="coerce")
 
-    # filters
     df_f = df.copy()
     df_f = df_f[df_f["mdd"].notna() & df_f["cagr"].notna()]
     df_f = df_f[df_f["mdd"] >= float(wf_cfg.filter_mdd_min)]
     df_f = df_f[df_f["max_recovery_years"].notna() & (df_f["max_recovery_years"] <= float(wf_cfg.filter_max_recovery_years_max))]
 
-    # if all filtered out, fall back to unfiltered
     use = df_f if not df_f.empty else df
 
     if wf_cfg.score_mode == "cagr_only":
         use = use.sort_values(["cagr"], ascending=[False], na_position="last")
     elif wf_cfg.score_mode == "cagr_minus_dd":
-        # score = cagr - w*abs(mdd)
         w = float(wf_cfg.score_dd_weight)
         use["score"] = use["cagr"] - w * use["mdd"].abs()
         use = use.sort_values(["score", "cagr"], ascending=[False, False], na_position="last")
     else:
-        # default: cagr desc, then mdd desc(less negative better), then recovery asc (shorter better)
         use = use.sort_values(["cagr", "mdd", "max_recovery_years"], ascending=[False, False, True], na_position="last")
 
     return use.to_dict(orient="records")
+
+
+# -------------------------
+# parallel worker globals (fork-friendly)
+# -------------------------
+_G_BASE_CFG: Optional[dict] = None
+_G_PX_TRAIN: Optional[pd.DataFrame] = None
+_G_TR_START: Optional[pd.Timestamp] = None
+_G_TR_END: Optional[pd.Timestamp] = None
+
+
+def _init_worker(base_cfg: dict, px_train: pd.DataFrame, tr_s: pd.Timestamp, tr_e: pd.Timestamp) -> None:
+    global _G_BASE_CFG, _G_PX_TRAIN, _G_TR_START, _G_TR_END
+    _G_BASE_CFG = base_cfg
+    _G_PX_TRAIN = px_train
+    _G_TR_START = tr_s
+    _G_TR_END = tr_e
+
+
+def _eval_candidate(overlay: dict) -> Optional[dict]:
+    """
+    Evaluate one candidate on the TRAIN window, using global px_train (warmup included).
+    Returns row dict or None.
+    """
+    global _G_BASE_CFG, _G_PX_TRAIN, _G_TR_START, _G_TR_END
+    if _G_BASE_CFG is None or _G_PX_TRAIN is None or _G_TR_START is None or _G_TR_END is None:
+        raise RuntimeError("Worker globals not initialized")
+
+    cfg = deep_merge(_G_BASE_CFG, overlay)
+
+    eq, *_ = run_meta_portfolio(_G_PX_TRAIN, cfg)
+    seg = eq.loc[(eq.index >= _G_TR_START) & (eq.index <= _G_TR_END)]
+    if seg.empty:
+        return None
+    seg = rebase(seg)
+
+    met = compute_metrics(seg)
+    rec_days, rec_years = max_recovery_days(seg)
+
+    import hashlib
+    params_json = json.dumps(overlay, sort_keys=True, ensure_ascii=False, separators=(",", ":"))
+    param_id = hashlib.sha1(params_json.encode("utf-8")).hexdigest()[:10]
+
+    row = {
+        "param_id": param_id,
+        "cagr": float(met.get("cagr", math.nan)),
+        "mdd": float(met.get("mdd", math.nan)),
+        "seed_multiple": float(met.get("seed_multiple", math.nan)),
+        "max_recovery_days": float(rec_days),
+        "max_recovery_years": float(rec_years),
+        "params_json": params_json,
+    }
+    flat = flatten_dict(overlay)
+    for k, v in flat.items():
+        row[f"params__{k}"] = v
+    return row
+
+
+def parse_args():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--config", required=True, help="Base config (fixed params)")
+    ap.add_argument("--grid", required=True, help="Grid yml (scan params)")
+    ap.add_argument("--wf", required=True, help="WF config yml")
+    ap.add_argument("--out", required=True, help="Output directory")
+    ap.add_argument("--prices-csv", default="", help="Optional prebuilt prices.csv (skip download)")
+    ap.add_argument("--workers", type=int, default=1, help="Parallel workers for grid eval per step (>=1)")
+    return ap.parse_args()
 
 
 def main():
@@ -289,15 +323,10 @@ def main():
 
     prices.to_csv(os.path.join(args.out, "prices.csv"), index=True)
 
-    # monthly decision dates (last trading day)
     rebal_dates = month_end_trading_days(prices)
     if len(rebal_dates) < 24:
         raise ValueError(f"Not enough month-end trading days found: {len(rebal_dates)}")
 
-    # OOS timeline: for each decision date d, apply selected params to next test_months months
-    # Example: d=2020-01-31, test is 2020-02-01..2020-02-28 (end=month-end)
-    # We will define test_start as next trading day after d (or next index date),
-    # and test_end as the month-end after test_months months.
     idx = prices.index
 
     def next_trading_day(d: pd.Timestamp) -> Optional[pd.Timestamp]:
@@ -309,7 +338,7 @@ def main():
             return None
         return idx[i + 1]
 
-    # Build decision points where we can form both train and test
+    # build decision plan
     plan = []
     for d in rebal_dates:
         test_start = next_trading_day(d)
@@ -322,12 +351,11 @@ def main():
 
         # test end: month-end after test_months
         test_month_end = (pd.Timestamp(test_start) + pd.DateOffset(months=wf_cfg.test_months)).to_period("M").to_timestamp("M")
-        test_end = prices.index[prices.index <= test_month_end]
-        if len(test_end) == 0:
+        cand_end = prices.index[prices.index <= test_month_end]
+        if len(cand_end) == 0:
             continue
-        test_end = test_end.max()
+        test_end = cand_end.max()
 
-        # ensure windows in range
         if train_start < prices.index.min():
             continue
         if test_end > prices.index.max():
@@ -346,48 +374,80 @@ def main():
     if not plan:
         raise ValueError("No valid WF windows could be formed (check price date range).")
 
-    # OOS equity stitching
+    # OOS stitching
     oos_curve_parts = []
     selections_rows = []
-
-    # start equity at 1.0
     equity_mult = 1.0
 
+    # WF progress timer
+    wf_t0 = time.time()
+    total_steps = len(plan)
+
     for step_i, w in enumerate(plan, 1):
+        step_t0 = time.time()
+
         d = w["decision_date"]
         tr_s, tr_e = w["train_start"], w["train_end"]
         te_s, te_e = w["test_start"], w["test_end"]
 
-        # --- TRAIN: evaluate candidates ---
-        cand_rows = []
-        for overlay in param_sets:
-            cfg = deep_merge(base_cfg, overlay)
-            seg_eq, met = run_window(prices, cfg, tr_s, tr_e, warmup_days=wf_cfg.warmup_days)
-            if not met:
-                continue
+        # TRAIN warm slice ONCE per step
+        px_train = slice_with_warmup(prices, tr_s, tr_e, warmup_days=wf_cfg.warmup_days)
+        if px_train.empty:
+            continue
 
-            row = {
-                "decision_date": str(d.date()),
-                "train_start": str(tr_s.date()),
-                "train_end": str(tr_e.date()),
-                "param_id": "",  # filled below
-                "cagr": float(met.get("cagr", math.nan)),
-                "mdd": float(met.get("mdd", math.nan)),
-                "seed_multiple": float(met.get("seed_multiple", math.nan)),
-                "max_recovery_days": float(met.get("max_recovery_days", math.nan)),
-                "max_recovery_years": float(met.get("max_recovery_years", math.nan)),
-                "params_json": json.dumps(overlay, sort_keys=True, ensure_ascii=False, separators=(",", ":")),
-            }
-            # flatten params for debugging/analysis
-            flat = flatten_dict(overlay)
-            for k, v in flat.items():
-                row[f"params__{k}"] = v
+        # --- TRAIN: eval all candidates (parallel inside a step) ---
+        cand_rows: List[dict] = []
 
-            # deterministic param_id (hash of params_json)
-            import hashlib
-            row["param_id"] = hashlib.sha1(row["params_json"].encode("utf-8")).hexdigest()[:10]
+        n_cands = len(param_sets)
+        cand_t0 = time.time()
 
-            cand_rows.append(row)
+        if args.workers <= 1:
+            for j, overlay in enumerate(param_sets, 1):
+                _init_worker(base_cfg, px_train, tr_s, tr_e)
+                row = _eval_candidate(overlay)
+                if row:
+                    cand_rows.append(row)
+
+                if j == 1 or j % wf_cfg.progress_every_candidates == 0 or j == n_cands:
+                    elapsed = time.time() - cand_t0
+                    per = elapsed / j
+                    eta = per * (n_cands - j)
+                    print(
+                        f"[WF-TRAIN] step={step_i}/{total_steps} cand={j}/{n_cands} "
+                        f"elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m per={per:.2f}s"
+                    )
+        else:
+            # process pool (fork on linux is fast; on windows it will still work but may be slower)
+            import multiprocessing as mp
+            from concurrent.futures import ProcessPoolExecutor, as_completed
+
+            ctx = mp.get_context("fork") if hasattr(mp, "get_context") else None
+            executor_args = {}
+            if ctx is not None:
+                executor_args["mp_context"] = ctx
+
+            with ProcessPoolExecutor(
+                max_workers=int(args.workers),
+                initializer=_init_worker,
+                initargs=(base_cfg, px_train, tr_s, tr_e),
+                **executor_args,
+            ) as ex:
+                futures = [ex.submit(_eval_candidate, overlay) for overlay in param_sets]
+                done = 0
+                for fut in as_completed(futures):
+                    done += 1
+                    row = fut.result()
+                    if row:
+                        cand_rows.append(row)
+
+                    if done == 1 or done % wf_cfg.progress_every_candidates == 0 or done == n_cands:
+                        elapsed = time.time() - cand_t0
+                        per = elapsed / done
+                        eta = per * (n_cands - done)
+                        print(
+                            f"[WF-TRAIN] step={step_i}/{total_steps} cand={done}/{n_cands} "
+                            f"elapsed={elapsed/60:.1f}m eta={eta/60:.1f}m per={per:.2f}s workers={args.workers}"
+                        )
 
         ranked = rank_candidates(cand_rows, wf_cfg)
         if not ranked:
@@ -396,36 +456,29 @@ def main():
         chosen = ranked[0]
         chosen_overlay = json.loads(chosen["params_json"])
 
-        # store top-k snapshot
+        # save top-k snapshot
         topk = ranked[: max(1, wf_cfg.top_k)]
         topk_path = os.path.join(args.out, f"train_topk_{step_i:03d}_{d.date()}.csv")
         pd.DataFrame(topk).to_csv(topk_path, index=False)
 
         # --- TEST: run chosen params on OOS month(s) ---
         chosen_cfg = deep_merge(base_cfg, chosen_overlay)
-        test_eq, test_met = run_window(prices, chosen_cfg, te_s, te_e, warmup_days=wf_cfg.warmup_days)
-        if test_eq.empty or not test_met:
-            # still log selection, but skip stitching
-            selections_rows.append(
-                {
-                    "step": step_i,
-                    "decision_date": str(d.date()),
-                    "train_start": str(tr_s.date()),
-                    "train_end": str(tr_e.date()),
-                    "test_start": str(te_s.date()),
-                    "test_end": str(te_e.date()),
-                    "chosen_param_id": chosen["param_id"],
-                    "chosen_params_json": chosen["params_json"],
-                    "train_cagr": chosen["cagr"],
-                    "train_mdd": chosen["mdd"],
-                    "train_max_recovery_years": chosen["max_recovery_years"],
-                    "test_note": "insufficient test data",
-                }
-            )
+        px_test = slice_with_warmup(prices, te_s, te_e, warmup_days=wf_cfg.warmup_days)
+        if px_test.empty:
             continue
 
-        # stitch OOS: multiply by current equity_mult
-        stitched = test_eq * equity_mult
+        eq_test, *_ = run_meta_portfolio(px_test, chosen_cfg)
+        seg = eq_test.loc[(eq_test.index >= te_s) & (eq_test.index <= te_e)]
+        if seg.empty:
+            continue
+        seg = rebase(seg)
+
+        test_met = compute_metrics(seg)
+        rec_days, rec_years = max_recovery_days(seg)
+        test_met["max_recovery_days"] = float(rec_days)
+        test_met["max_recovery_years"] = float(rec_years)
+
+        stitched = seg * equity_mult
         equity_mult = float(stitched.iloc[-1])
 
         oos_curve_parts.append(stitched)
@@ -442,8 +495,8 @@ def main():
                 "chosen_params_json": chosen["params_json"],
                 "train_cagr": chosen["cagr"],
                 "train_mdd": chosen["mdd"],
-                "train_seed_multiple": chosen["seed_multiple"],
-                "train_max_recovery_years": chosen["max_recovery_years"],
+                "train_seed_multiple": chosen.get("seed_multiple", math.nan),
+                "train_max_recovery_years": chosen.get("max_recovery_years", math.nan),
                 "test_seed_multiple": float(test_met.get("seed_multiple", math.nan)),
                 "test_cagr": float(test_met.get("cagr", math.nan)),
                 "test_mdd": float(test_met.get("mdd", math.nan)),
@@ -451,16 +504,24 @@ def main():
             }
         )
 
-        # persist test curve for this step
         test_curve_path = os.path.join(args.out, f"equity_oos_{step_i:03d}_{te_s.date()}_{te_e.date()}.csv")
         stitched.to_csv(test_curve_path, index=True)
 
-        print(
-            f"[WF] {step_i}/{len(plan)} decision={d.date()} "
-            f"train={tr_s.date()}..{tr_e.date()} test={te_s.date()}..{te_e.date()} "
-            f"pick={chosen['param_id']} train_cagr={chosen['cagr']*100:.2f}% train_mdd={chosen['mdd']*100:.2f}% "
-            f"test_cagr={float(test_met.get('cagr',0))*100:.2f}% test_mdd={float(test_met.get('mdd',0))*100:.2f}%"
-        )
+        # step progress + ETA
+        step_elapsed = time.time() - step_t0
+        wf_elapsed = time.time() - wf_t0
+        per_step = wf_elapsed / step_i
+        wf_eta = per_step * (total_steps - step_i)
+
+        if step_i == 1 or step_i % max(1, wf_cfg.progress_every_steps) == 0 or step_i == total_steps:
+            print(
+                f"[WF-STEP] {step_i}/{total_steps} decision={d.date()} "
+                f"train={tr_s.date()}..{tr_e.date()} test={te_s.date()}..{te_e.date()} "
+                f"pick={chosen['param_id']} "
+                f"train_cagr={chosen['cagr']*100:.2f}% train_mdd={chosen['mdd']*100:.2f}% "
+                f"test_cagr={float(test_met.get('cagr',0))*100:.2f}% test_mdd={float(test_met.get('mdd',0))*100:.2f}% "
+                f"step_elapsed={step_elapsed/60:.1f}m wf_elapsed={wf_elapsed/60:.1f}m wf_eta={wf_eta/60:.1f}m"
+            )
 
     # write selections log
     sel_df = pd.DataFrame(selections_rows)
@@ -469,7 +530,6 @@ def main():
     # merge OOS curve
     if oos_curve_parts:
         oos = pd.concat(oos_curve_parts).sort_index()
-        # drop duplicate dates if windows overlap (keep last)
         oos = oos[~oos.index.duplicated(keep="last")]
         oos.to_csv(os.path.join(args.out, "equity_curve_oos.csv"), index=True)
 
@@ -491,6 +551,7 @@ def main():
                 "wf": wf_cfg.__dict__,
                 "num_candidates": len(param_sets),
                 "num_steps": len(selections_rows),
+                "workers": int(args.workers),
             },
             f,
             indent=2,
