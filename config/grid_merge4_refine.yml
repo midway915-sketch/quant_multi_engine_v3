@@ -12,7 +12,7 @@ crash:
   threshold: [-0.10]
   fast:
     enabled: [true]
-    lookback_days: [6]
+    lookback_days: [6, 7]
     threshold: [-0.06]
 
 bear_fast:
