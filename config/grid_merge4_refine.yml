@@ -20,12 +20,8 @@ bear_fast:
   lookback_days: [3, 4]
   threshold: [-0.045]
 
-# ✅ OFF 비교를 하려면 enabled에 false를 넣어야 의미가 있음
-# (enabled=false면 아래 lb/thr는 무시될 거라 낭비가 생김)
-# 그래서 "OFF 1개 + ON 그리드"를 권장하지만,
-# 한 번에 돌리고 싶다면 enabled [false,true]로 두자.
 soxx_gate:
-  enabled: [false, true]
+  enabled: [true]
   mode: ["mom"]
   mom_lookback_days: [80, 87, 90]
   mom_threshold: [0.012, 0.024, 0.048]
