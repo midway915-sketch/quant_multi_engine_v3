@@ -3,8 +3,8 @@ data:
 
 state:
   base_ticker: ["SPY"]
-  ma_days: [130, 150, 170]
-  min_hold_days: [9, 11, 13]
+  ma_days: [150, 170, 180, 190, 200]
+  min_hold_days: [5, 6, 7, 8, 9]
 
 crash:
   enabled: [true]
@@ -12,13 +12,13 @@ crash:
   threshold: [-0.08, -0.10, -0.12]
   fast:
     enabled: [true]
-    lookback_days: [6, 7]
-    threshold: [-0.06]
+    lookback_days: [4, 5, 6]
+    threshold: [-0.04, -0.06, -0.08]
 
 bear_fast:
   enabled: [true]
-  lookback_days: [3, 4]
-  threshold: [-0.045]
+  lookback_days: [4, 5, 6]
+  threshold: [-0.02, -0.045, -0.07]
 
 soxx_gate:
   enabled: [true]
