@@ -6,11 +6,11 @@ on:
       base_config:
         description: "Base config yml (fixed params)"
         required: true
-        default: "config/default_stress_biweekly.yml"
+        default: "config/default_stress_costs.yml"
       grid_path:
         description: "Grid yml (scan space, e.g. soxx_gate only)"
         required: true
-        default: "config/grid_soxx_gate_mom_3600.yml"
+        default: "config/grid_merge4_refine.yml"
       wf_config:
         description: "WF config yml"
         required: true
