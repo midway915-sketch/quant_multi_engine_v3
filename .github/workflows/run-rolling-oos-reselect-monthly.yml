@@ -1,0 +1,66 @@
+name: run-rolling-oos-reselect-monthly
+
+on:
+  workflow_dispatch:
+    inputs:
+      base_config:
+        description: "Base config yml (fixed params)"
+        required: true
+        default: "config/default_stress_biweekly.yml"
+      grid_path:
+        description: "Grid yml (scan space, e.g. soxx_gate only)"
+        required: true
+        default: "config/grid_soxx_gate_mom_3600.yml"
+      wf_config:
+        description: "WF config yml"
+        required: true
+        default: "config/wf_reselect_monthly.yml"
+      out_dir:
+        description: "Output directory"
+        required: true
+        default: "out/wf_reselect_monthly"
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run rolling WF (reselect monthly)
+        run: |
+          mkdir -p "${{ inputs.out_dir }}"
+          python -m scripts.run_rolling_oos_reselect_monthly \
+            --config "${{ inputs.base_config }}" \
+            --grid "${{ inputs.grid_path }}" \
+            --wf "${{ inputs.wf_config }}" \
+            --out "${{ inputs.out_dir }}"
+
+      - name: Debug - list outputs
+        if: always()
+        run: |
+          echo "[DEBUG] out_dir=${{ inputs.out_dir }}"
+          find "${{ inputs.out_dir }}" -maxdepth 2 -type f -print || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wf-reselect-monthly-results
+          if-no-files-found: warn
+          path: |
+            ${{ inputs.out_dir }}/
