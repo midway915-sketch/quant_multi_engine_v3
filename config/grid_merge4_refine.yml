@@ -16,21 +16,21 @@ crash:
   threshold: [-0.10]
   fast:
     enabled: [true]
-    lookback_days: [5, 6, 7, 8] #7
-    threshold: [-0.05, -0.06, -0.07, -0.10] #-0.06
+    lookback_days: [6] #7
+    threshold: [-0.06] #-0.06
 
 bear_fast:
-  enabled: [true, false]
-  lookback_days: [2, 3, 4, 5] #3
-  threshold: [-0.040, -0.045, -0.050, -0.10] #-0.045
+  enabled: [true]
+  lookback_days: [3, 4] #3
+  threshold: [-0.045] #-0.045
 
 soxx_gate:
-  enabled: [true, false]
+  enabled: [true]
   mode: ["mom"]
 
-  mom_lookback_days: [80, 85, 87, 90] #87
+  mom_lookback_days: [80, 87, 90] #87
 
-  mom_threshold: [0.012, 0.024, 0.036, 0.048] #0.024
+  mom_threshold: [0.012, 0.024, 0.048] #0.024
 
 risk_off:
   mode: ["SGOV_100"]
@@ -40,7 +40,7 @@ trend_engine:
   candidates:
     - ["QQQ","SPY","SOXX"]
   top_n: [1]
-  leverage_mode: ["proxy_3x"] # "1x", "2x", "proxy_3x"
+  leverage_mode: ["1x", "2x", "proxy_3x"] # "1x", "2x", "proxy_3x"
 
 meanrev_engine:
   lookback_days: [20]
@@ -53,6 +53,9 @@ meanrev_engine:
   base: ["SPY"]
 
 allocator:
-  bull:   {trend: [1.00], meanrev: [0.00], defensive: [0.00]}
+  bull:   
+    trend: [1.00, 0.75]
+    meanrev: [0.00]
+    defensive: [0.00, 0.25]
   bear:   {trend: [0.00], meanrev: [0.00], defensive: [1.00]}
   crash:  {trend: [0.00], meanrev: [0.00], defensive: [1.00]}
