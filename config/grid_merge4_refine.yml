@@ -3,28 +3,33 @@ data:
 
 state:
   base_ticker: ["SPY"]
-  ma_days: [170, 180, 190, 200]
-  min_hold_days: [6, 7, 8, 9]
+  ma_days: [150]
+  min_hold_days: [11]
 
 crash:
   enabled: [true]
-  lookback_days: [10, 12, 14]
-  threshold: [-0.03, -0.04, -0.05, -0.06]
+  lookback_days: [12]
+  threshold: [-0.08]
   fast:
     enabled: [true]
-    lookback_days: [4, 5, 6]
-    threshold: [-0.04, -0.06, -0.08]
+    lookback_days: [6]
+    threshold: [-0.06]
 
 bear_fast:
   enabled: [true]
-  lookback_days: [3]
-  threshold: [-0.040, -0.045]
+  lookback_days: [4]
+  threshold: [-0.045]
 
 soxx_gate:
   enabled: [true]
   mode: ["mom"]
-  mom_lookback_days: [90, 100]
-  mom_threshold: [0.030, 0.050, 0.060]
+  mom_lookback_days: [87]
+  mom_threshold: [0.024]
+
+soxx_crash:
+  enabled: [true]
+  lookback_days: [5, 7, 9, 11, 13, 15, 17, 20]
+  threshold: [-0.08, -0.10, -0.12, -0.14, -0.16, -0.18, -0.20]
 
 risk_off:
   mode: ["SGOV_100"]
