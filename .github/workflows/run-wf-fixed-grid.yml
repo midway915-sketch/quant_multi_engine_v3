@@ -1,0 +1,107 @@
+name: run-wf-fixed-grid
+
+on:
+  workflow_dispatch:
+    inputs:
+      config_path:
+        description: "Base config yml"
+        required: true
+        default: "config/default_stress_biweekly.yml"
+      grid_path:
+        description: "Grid yml (combos or scan)"
+        required: true
+        default: "config/grid_fixed_candidates_ABC_combos.yml"
+      out_dir:
+        description: "Output directory"
+        required: true
+        default: "out/wf_fixed_grid_abc"
+      rank_by:
+        description: "Ranking: oos_cagr | oos_seed | oos_score"
+        required: true
+        default: "oos_cagr"
+
+jobs:
+  prep:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Build prices.csv once
+        run: |
+          mkdir -p out/prep
+          python -c "import yaml; import pandas as pd; from src.core.data import download_prices_and_build_proxies; cfg=yaml.safe_load(open('${{ inputs.config_path }}','r',encoding='utf-8')); px=download_prices_and_build_proxies(cfg); px.to_csv('out/prep/prices.csv', index=True)"
+
+      - name: Upload prices artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: wf-fixed-grid-prices
+          if-no-files-found: error
+          path: |
+            out/prep/prices.csv
+
+  run:
+    runs-on: ubuntu-latest
+    needs: [prep]
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Download prices artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: wf-fixed-grid-prices
+          path: out/prep
+
+      - name: Run WF fixed-grid
+        run: |
+          mkdir -p "${{ inputs.out_dir }}"
+          python -m scripts.run_rolling_oos_fixed_grid \
+            --config "${{ inputs.config_path }}" \
+            --grid "${{ inputs.grid_path }}" \
+            --out "${{ inputs.out_dir }}" \
+            --prices-csv "out/prep/prices.csv" \
+            --rank-by "${{ inputs.rank_by }}"
+
+      - name: Debug - list outputs
+        if: always()
+        run: |
+          echo "[DEBUG] out_dir=${{ inputs.out_dir }}"
+          find "${{ inputs.out_dir }}" -maxdepth 2 -type f -print || true
+
+      - name: Upload artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: wf-fixed-grid-results
+          if-no-files-found: warn
+          path: |
+            ${{ inputs.out_dir }}/
