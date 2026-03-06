@@ -3,8 +3,8 @@ data:
 
 state:
   base_ticker: ["SPY"]
-  ma_days: [180, 190, 200]
-  min_hold_days: [6, 7, 8]
+  ma_days: [170, 180, 190, 200]
+  min_hold_days: [6, 7, 8, 9]
 
 crash:
   enabled: [true]
