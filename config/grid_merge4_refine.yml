@@ -44,17 +44,17 @@ asset_crash:
   spy:
     enabled: [true]
     lookback_days: [10, 12, 15]
-    threshold: [-0.07, -0.08, -0.10]
+    threshold: [-0.05, -0.06, -0.07, -0.08, -0.10]
 
   qqq:
     enabled: [true]
     lookback_days: [8, 10, 12]
-    threshold: [-0.08, -0.10, -0.12]
+    threshold: [-0.05, -0.06, -0.07, -0.08, -0.10, -0.12]
 
   soxx:
     enabled: [true]
     lookback_days: [4, 6, 8]
-    threshold: [-0.10, -0.12, -0.15]
+    threshold: [-0.05, -0.06, -0.07, -0.08, -0.09, -0.10]
 
 allocator:
   bull:   {trend: [1.00], meanrev: [0.00], defensive: [0.00]}
