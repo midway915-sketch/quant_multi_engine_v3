@@ -25,7 +25,7 @@ bear_fast:
   threshold: [-0.045] #-0.045
 
 soxx_gate:
-  enabled: [true]
+  enabled: [false]
   mode: ["mom"]
 
   mom_lookback_days: [80, 87, 90] #87
@@ -38,9 +38,9 @@ risk_off:
 trend_engine:
   mom_lookback_days: [126]
   candidates:
-    - ["QQQ","SPY","SOXX"]
+    - ["QQQ","SPY"]
   top_n: [1]
-  leverage_mode: ["1x", "2x", "proxy_3x"] # "1x", "2x", "proxy_3x"
+  leverage_mode: ["proxy_3x"] # "1x", "2x", "proxy_3x"
 
 meanrev_engine:
   lookback_days: [20]
