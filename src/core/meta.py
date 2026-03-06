@@ -129,7 +129,28 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     port_cfg = cfg.get("portfolio", {}) or {}
     reb_mode = str(port_cfg.get("rebalance", "weekly")).lower().strip()
     when_mode = str(port_cfg.get("when", "week_end")).lower().strip()
-
+    
+    # --- Asset crash (holding-dependent) ---
+    asset_crash_cfg = (cfg.get("asset_crash", {}) or {})
+    asset_crash_enabled = bool(asset_crash_cfg.get("enabled", False))
+    
+    asset_crash_lb = int(asset_crash_cfg.get("lookback_days", 6))
+    asset_crash_thr = float(asset_crash_cfg.get("threshold", -0.06))
+    
+    # underlying used to judge crash by held leveraged position
+    # (trade_col -> underlying_col)
+    asset_crash_map = {
+        "SOXL_MIX": "SOXX",
+        "TQQQ_MIX": "QQQ",
+        "UPRO_MIX": "SPY",
+    }
+    
+    # precompute lookahead-safe N-day returns on underlyings
+    # today dt uses yesterday-confirmed N-day return
+    _under_rets = {}
+    for under in set(asset_crash_map.values()):
+        if under in prices.columns:
+            _under_rets[under] = prices[under].pct_change(asset_crash_lb).shift(1)
     # ---- Costs ----
     costs_cfg = cfg.get("costs", {}) or {}
     buy_cost = float(costs_cfg.get("buy", 0.0))
