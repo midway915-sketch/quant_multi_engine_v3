@@ -48,8 +48,9 @@ jobs:
             --config "${{ inputs.base_config }}" \
             --grid "${{ inputs.grid_path }}" \
             --wf "${{ inputs.wf_config }}" \
-            --out "${{ inputs.out_dir }}"
-
+            --out "${{ inputs.out_dir }}" \
+            --workers 4
+      
       - name: Debug - list outputs
         if: always()
         run: |
