@@ -40,24 +40,21 @@ trend_engine:
 meanrev_engine:
   base: ["SPY"]
 
-# 현재 실제 보유 자산별 개별 crush override
-# - global crash와 별개로 동작
-# - 현재 보유 중인 자산의 underlying 기준으로만 적용
 asset_crash:
   spy:
-    enabled: [true, false]
-    lookback_days: [12]
-    threshold: [-0.08]
+    enabled: [true]
+    lookback_days: [10, 12, 15]
+    threshold: [-0.07, -0.08, -0.10]
 
   qqq:
-    enabled: [true, false]
-    lookback_days: [12]
-    threshold: [-0.08]
+    enabled: [true]
+    lookback_days: [8, 10, 12]
+    threshold: [-0.08, -0.10, -0.12]
 
   soxx:
-    enabled: [true, false]
-    lookback_days: [12]
-    threshold: [-0.08]
+    enabled: [true]
+    lookback_days: [4, 6, 8]
+    threshold: [-0.10, -0.12, -0.15]
 
 allocator:
   bull:   {trend: [1.00], meanrev: [0.00], defensive: [0.00]}
