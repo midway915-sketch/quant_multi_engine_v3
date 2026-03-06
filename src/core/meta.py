@@ -119,6 +119,24 @@ def _turnover_cost_frac(w_prev: dict, w_new: dict, buy_cost: float, sell_cost: f
 def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     """
     Lookahead-free + 거래비용 적용 + SOXX gate + Trend 레버리지(1x/2x/3x) 스캔 지원
+
+    추가:
+    - 기존 global crash(state_df 기반)는 그대로 유지
+    - asset_crash는 현재 보유 중인 자산의 underlying 기준으로 개별 판정
+      예)
+        asset_crash:
+          spy:
+            enabled: true
+            lookback_days: 12
+            threshold: -0.08
+          qqq:
+            enabled: true
+            lookback_days: 10
+            threshold: -0.10
+          soxx:
+            enabled: true
+            lookback_days: 6
+            threshold: -0.12
     """
     prices = prices.copy()
     returns = prices.pct_change().fillna(0.0)
@@ -129,28 +147,44 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     port_cfg = cfg.get("portfolio", {}) or {}
     reb_mode = str(port_cfg.get("rebalance", "weekly")).lower().strip()
     when_mode = str(port_cfg.get("when", "week_end")).lower().strip()
-    
-    # --- Asset crash (holding-dependent) ---
+
+    # ---- Asset crash (holding-dependent, per underlying) ----
     asset_crash_cfg = (cfg.get("asset_crash", {}) or {})
-    asset_crash_enabled = bool(asset_crash_cfg.get("enabled", False))
-    
-    asset_crash_lb = int(asset_crash_cfg.get("lookback_days", 6))
-    asset_crash_thr = float(asset_crash_cfg.get("threshold", -0.06))
-    
-    # underlying used to judge crash by held leveraged position
-    # (trade_col -> underlying_col)
-    asset_crash_map = {
-        "SOXL_MIX": "SOXX",
-        "TQQQ_MIX": "QQQ",
-        "UPRO_MIX": "SPY",
+
+    def _asset_rule(name_upper: str) -> dict:
+        sub = asset_crash_cfg.get(name_upper.lower(), {}) or asset_crash_cfg.get(name_upper, {}) or {}
+        return {
+            "enabled": bool(sub.get("enabled", False)),
+            "lookback_days": int(sub.get("lookback_days", 6)),
+            "threshold": float(sub.get("threshold", -0.06)),
+        }
+
+    asset_crash_rules = {
+        "SPY": _asset_rule("SPY"),
+        "QQQ": _asset_rule("QQQ"),
+        "SOXX": _asset_rule("SOXX"),
     }
-    
-    # precompute lookahead-safe N-day returns on underlyings
-    # today dt uses yesterday-confirmed N-day return
+
+    # 현재 보유 trade_col -> underlying
+    asset_crash_map = {
+        "UPRO_MIX": "SPY",
+        "SSO_MIX": "SPY",
+        "SPY": "SPY",
+        "TQQQ_MIX": "QQQ",
+        "QLD_MIX": "QQQ",
+        "QQQ": "QQQ",
+        "SOXL_MIX": "SOXX",
+        "USD_MIX": "SOXX",
+        "SOXX": "SOXX",
+    }
+
+    # underlying별 lookahead-safe N-day return 사전 계산
     _under_rets = {}
-    for under in set(asset_crash_map.values()):
-        if under in prices.columns:
-            _under_rets[under] = prices[under].pct_change(asset_crash_lb).shift(1)
+    for under, rule in asset_crash_rules.items():
+        if rule["enabled"] and under in prices.columns:
+            lb = int(rule["lookback_days"])
+            _under_rets[(under, lb)] = prices[under].pct_change(lb).shift(1)
+
     # ---- Costs ----
     costs_cfg = cfg.get("costs", {}) or {}
     buy_cost = float(costs_cfg.get("buy", 0.0))
@@ -274,7 +308,9 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
 
         # 1) today return using h_cur
         for t, w in h_cur.items():
-            holdings_daily_rows.append({"date": str(dt.date()), "ticker": t, "weight": float(w), "state": st})
+            holdings_daily_rows.append(
+                {"date": str(dt.date()), "ticker": t, "weight": float(w), "state": st}
+            )
 
         daily_ret = 0.0
         for t, w in h_cur.items():
@@ -289,34 +325,38 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         soxx_gate_applied = False
         soxx_gate_blocked = False
         soxx_gate_value = float("nan")
-        # --- holding-dependent asset crash override (applies to tomorrow holdings) ---
+
+        # --- holding-dependent asset crash override ---
         asset_crash_hit = False
         asset_crash_under = ""
-        
-        if asset_crash_enabled:
-            # 오늘 보유(h_cur) 중에 레버리지 자산이 있으면 그에 해당하는 underlying을 본다
-            held = list(h_cur.keys())
-            for trade_col in held:
-                under = asset_crash_map.get(trade_col, "")
-                if not under:
-                    continue
-                s = _under_rets.get(under)
-                if s is None:
-                    continue
-                v = s.loc[dt]
-                if pd.notna(v) and float(v) <= asset_crash_thr:
-                    asset_crash_hit = True
-                    asset_crash_under = under
-                    break
-        
-        # asset crash가 hit이면, "내일" 목표는 SGOV 100%로 강제
-        if asset_crash_hit:
-            # 여기서는 state를 덮어써서 기록만 남김(선택)
-            st_key = "crash"
-            w_tr = 0.0
-            w_mr = 0.0
-            w_df = 1.0
+        asset_crash_value = float("nan")
+        asset_crash_lb_used = np.nan
+        asset_crash_thr_used = np.nan
 
+        held = list(h_cur.keys())
+        for trade_col in held:
+            under = asset_crash_map.get(trade_col, "")
+            if not under:
+                continue
+
+            rule = asset_crash_rules.get(under, {})
+            if not rule or (not rule["enabled"]):
+                continue
+
+            lb = int(rule["lookback_days"])
+            thr = float(rule["threshold"])
+            s = _under_rets.get((under, lb))
+            if s is None:
+                continue
+
+            v = s.loc[dt]
+            if pd.notna(v) and float(v) <= thr:
+                asset_crash_hit = True
+                asset_crash_under = under
+                asset_crash_value = float(v)
+                asset_crash_lb_used = lb
+                asset_crash_thr_used = thr
+                break
 
         if rebalance_today:
             m = mom.loc[dt].reindex(candidates)
@@ -332,7 +372,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                     ranked2 = ranked.drop(index=["SOXX"], errors="ignore")
                     top = list(ranked2.index[:top_n])
 
-            # ✅ 여기서 leverage_mode에 따라 실제 매매 컬럼 결정
             current_trend_tradecols = [_trend_trade_col(t, trend_leverage_mode) for t in top if t is not None]
 
             wk = _week_end_index(pd.DatetimeIndex([dt]))[0]
@@ -355,12 +394,17 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                 "soxx_gate_blocked": bool(soxx_gate_blocked),
                 "soxx_gate_mode": soxx_gate_mode,
                 "soxx_gate_value": (float(soxx_gate_value) if pd.notna(soxx_gate_value) else np.nan),
+                "asset_crash_hit": bool(asset_crash_hit),
+                "asset_crash_under": asset_crash_under,
+                "asset_crash_value": (float(asset_crash_value) if pd.notna(asset_crash_value) else np.nan),
+                "asset_crash_lb_used": asset_crash_lb_used,
+                "asset_crash_thr_used": asset_crash_thr_used,
             }
             row["rank1_week_ret"] = get_week_ret(row["rank1_trade"], wk) if row["rank1_trade"] else np.nan
             row["rank2_week_ret"] = get_week_ret(row["rank2_trade"], wk) if row["rank2_trade"] else np.nan
             picks_rows.append(row)
 
-        # meanrev (kept)
+        # ---- meanrev (kept) ----
         mr_price_under = prices[mr_base] if mr_base in prices.columns else None
         if mr_price_under is None or mr_price_under.isna().all():
             mr_active = False
@@ -391,11 +435,21 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                         mr_entry_price = None
                         mr_days = 0
 
-        # build h_des
+        # ---- build h_des ----
         st_key = st.lower()
         w_tr = float(alloc[st_key]["trend"])
         w_mr = float(alloc[st_key]["meanrev"])
         w_df = float(alloc[st_key]["defensive"])
+
+        # global crash는 이미 state에 반영되어 있음
+        # asset_crash_hit이면 내일 목표 비중은 defensive 100%로 override
+        if asset_crash_hit:
+            w_tr = 0.0
+            w_mr = 0.0
+            w_df = 1.0
+            st_key_effective = "asset_crash"
+        else:
+            st_key_effective = st_key
 
         h_des: dict[str, float] = {}
 
@@ -441,6 +495,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             {
                 "date": str(dt.date()),
                 "state": st,
+                "state_effective": st_key_effective,
                 "w_trend": w_tr,
                 "w_meanrev": w_mr,
                 "w_defensive": w_df,
@@ -455,6 +510,11 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                 "cost_sell": float(sell_cost),
                 "cost_frac": float(cost_frac),
                 "traded": bool(traded),
+                "asset_crash_hit": bool(asset_crash_hit),
+                "asset_crash_under": asset_crash_under,
+                "asset_crash_value": (float(asset_crash_value) if pd.notna(asset_crash_value) else np.nan),
+                "asset_crash_lb_used": asset_crash_lb_used,
+                "asset_crash_thr_used": asset_crash_thr_used,
             }
         )
 
