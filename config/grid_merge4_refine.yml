@@ -75,6 +75,23 @@ recovery_boost:
     - ["SGOV_MIX", "QLD_MIX"]
   to_asset: ["TQQQ_MIX"]
 
+soxx_admission_filter:
+  enabled: [false, true]
+  ret20_positive_required: [true]
+  ret20_days: [20]
+  ma20_above_ma50_required: [true]
+  ma20_days: [20]
+  ma50_days: [50]
+  replacement_if_blocked: ["USD_MIX"]
+  apply_only_rank1: [true]
+
+sgov_exit_assist:
+  enabled: [false, true]
+  apply_only_bull: [true]
+  qqq_ma_days: [50]
+  spy_ma_days: [50]
+  require_positive_mom: [false]
+
 allocator:
   bull:   {trend: [1.00], meanrev: [0.00], defensive: [0.00]}
   bear:   {trend: [0.00], meanrev: [0.00], defensive: [1.00]}
