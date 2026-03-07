@@ -7,68 +7,36 @@ from pathlib import Path
 import pandas as pd
 
 
-def find_equity_path_from_run_dir(run_dir: Path) -> Path:
-    candidates = [
-        run_dir / "equity_curve.csv",
-        run_dir / "equity.csv",
-    ]
-    for p in candidates:
-        if p.exists():
-            return p
-
-    # 혹시 하위 폴더에 있는 경우까지 탐색
-    matches = list(run_dir.rglob("equity_curve.csv"))
-    if matches:
-        return matches[0]
-
-    matches = list(run_dir.rglob("equity.csv"))
-    if matches:
-        return matches[0]
-
-    raise FileNotFoundError(f"equity curve file not found under: {run_dir}")
-
-
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--summary-csv", required=True, help="기존 멀티엔진 merged summary csv")
-    parser.add_argument("--runs-root", required=True, help="run 결과 폴더 루트")
-    parser.add_argument("--out-json", required=True, help="best equity path json 출력 경로")
-    parser.add_argument("--run-dir-column", default="run_dir", help="summary csv 안 run 폴더 컬럼명")
+    parser.add_argument("--summary-csv", required=True)
+    parser.add_argument("--runs-root", required=True)
+    parser.add_argument("--out-json", required=True)
+    parser.add_argument("--equity-filename", default="equity_curve.csv")
     args = parser.parse_args()
 
     summary = pd.read_csv(args.summary_csv)
     if summary.empty:
         raise ValueError("summary csv is empty")
 
-    # 기존 정렬 기준 그대로
     best = summary.sort_values(
         by=["cagr", "mdd", "max_recovery_days"],
         ascending=[False, False, True],
     ).iloc[0].to_dict()
 
-    run_dir_col = args.run_dir_column
-    runs_root = Path(args.runs_root)
+    lookback = int(best["lookback"])
+    rebalance = str(best["rebalance"])
+    top1_weight = float(best["top1_weight"])
 
-    if run_dir_col in best and pd.notna(best[run_dir_col]):
-        run_dir = runs_root / str(best[run_dir_col])
-    else:
-        # run_dir 컬럼이 없는 경우를 대비해 가장 흔한 패턴들 추정
-        # summary에 아래 컬럼이 있으면 조합명 생성
-        if {"lookback", "rebalance", "top1_weight"}.issubset(summary.columns):
-            run_name = f"lb_{int(best['lookback'])}__reb_{best['rebalance']}__w1_{str(float(best['top1_weight'])).replace('.', 'p')}"
-            run_dir = runs_root / run_name
-        else:
-            # 마지막 fallback: runs_root 아래에서 summary 정렬 1등과 대응되는 첫 equity 파일 탐색
-            matches = list(runs_root.rglob("equity_curve.csv"))
-            if not matches:
-                raise FileNotFoundError(f"run_dir column '{run_dir_col}' not found and no equity_curve.csv under {runs_root}")
-            run_dir = matches[0].parent
+    run_name = f"lb_{lookback}__reb_{rebalance}__w1_{str(top1_weight).replace('.', 'p')}"
+    equity_path = Path(args.runs_root) / run_name / args.equity_filename
 
-    equity_path = find_equity_path_from_run_dir(run_dir)
+    if not equity_path.exists():
+        raise FileNotFoundError(f"best equity path not found: {equity_path}")
 
     payload = {
         "best_params": best,
-        "run_dir": str(run_dir),
+        "run_name": run_name,
         "equity_path": str(equity_path),
     }
 
