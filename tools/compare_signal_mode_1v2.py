@@ -9,7 +9,7 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src.engine.meta import run_meta_portfolio
+from src.core.meta import run_meta_portfolio
 
 
 def unwrap_singletons(obj: Any) -> Any:
