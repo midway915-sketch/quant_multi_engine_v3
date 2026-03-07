@@ -94,7 +94,7 @@ sgov_exit_assist:
   qqq_ma_days: [50]
   spy_ma_days: [50]
   require_positive_mom: [false, true]
-"""
+  """
 
 allocator:
   bull:   {trend: [1.00], meanrev: [0.00], defensive: [0.00]}
