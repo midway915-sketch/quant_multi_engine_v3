@@ -1,0 +1,97 @@
+name: compare-signal-mode-1v2
+
+on:
+  workflow_dispatch:
+    inputs:
+      prices_csv:
+        description: 'daily prices csv path'
+        required: true
+        default: 'data/prices.csv'
+      meta_config_yaml:
+        description: 'final fixed meta config yaml'
+        required: true
+        default: 'config/final_meta_fixed.yml'
+      snapshot_root:
+        description: 'root dir with QQQ/SPY/SOXX snapshot_closes_wide.csv'
+        required: true
+        default: 'data/twelvedata_snapshots'
+      start_date:
+        description: 'YYYY-MM-DD'
+        required: true
+        default: '2021-01-01'
+      end_date:
+        description: 'YYYY-MM-DD'
+        required: true
+        default: '2024-12-31'
+      out_dir:
+        description: 'output directory'
+        required: true
+        default: 'out/compare_signal_mode_1v2'
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pandas numpy pyyaml yfinance
+
+      - name: Validate input files
+        run: |
+          if [ ! -f "${{ inputs.prices_csv }}" ]; then
+            echo "missing prices csv: ${{ inputs.prices_csv }}"
+            exit 1
+          fi
+          if [ ! -f "${{ inputs.meta_config_yaml }}" ]; then
+            echo "missing meta config: ${{ inputs.meta_config_yaml }}"
+            exit 1
+          fi
+          for sym in QQQ SPY SOXX; do
+            p="${{ inputs.snapshot_root }}/${sym}/snapshot_closes_wide.csv"
+            if [ ! -f "$p" ]; then
+              echo "missing snapshot file: $p"
+              exit 1
+            fi
+          done
+
+      - name: Run compare
+        run: |
+          mkdir -p "${{ inputs.out_dir }}"
+          python tools/compare_signal_mode_1v2.py \
+            --prices-csv "${{ inputs.prices_csv }}" \
+            --meta-config-yaml "${{ inputs.meta_config_yaml }}" \
+            --snapshot-root "${{ inputs.snapshot_root }}" \
+            --start-date "${{ inputs.start_date }}" \
+            --end-date "${{ inputs.end_date }}" \
+            --out-dir "${{ inputs.out_dir }}"
+
+      - name: Show summary
+        run: |
+          if [ -f "${{ inputs.out_dir }}/summary_compare_1v2.csv" ]; then
+            python -c "import pandas as pd; df = pd.read_csv(r'${{ inputs.out_dir }}/summary_compare_1v2.csv'); print(df.to_string(index=False))"
+          else
+            echo "summary_compare_1v2.csv not found"
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: compare-signal-mode-1v2-${{ github.run_number }}
+          if-no-files-found: error
+          path: |
+            ${{ inputs.out_dir }}/
