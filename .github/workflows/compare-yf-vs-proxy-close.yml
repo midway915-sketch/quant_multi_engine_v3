@@ -1,0 +1,82 @@
+name: compare-yf-vs-proxy-close
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: 'comma-separated symbols'
+        required: true
+        default: 'QQQ,SPY,SOXX'
+      start_date:
+        description: 'YYYY-MM-DD'
+        required: true
+        default: '2021-01-01'
+      end_date:
+        description: 'YYYY-MM-DD'
+        required: true
+        default: '2024-12-31'
+      snapshot_root:
+        description: 'snapshot root directory already in repo/workspace'
+        required: true
+        default: 'data/twelvedata_snapshots'
+      out_dir:
+        description: 'output directory'
+        required: true
+        default: 'data/compare_1v2'
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas yfinance
+
+      - name: Validate snapshot files
+        run: |
+          for sym in $(echo "${{ inputs.symbols }}" | tr ',' ' '); do
+            path="${{ inputs.snapshot_root }}/${sym}/snapshot_closes_wide.csv"
+            if [ ! -f "$path" ]; then
+              echo "missing file: $path"
+              exit 1
+            fi
+          done
+
+      - name: Run compare
+        run: |
+          mkdir -p "${{ inputs.out_dir }}"
+          python tools/download_yf_and_compare_with_proxy.py \
+            --snapshot-root "${{ inputs.snapshot_root }}" \
+            --symbols "${{ inputs.symbols }}" \
+            --start-date "${{ inputs.start_date }}" \
+            --end-date "${{ inputs.end_date }}" \
+            --out-dir "${{ inputs.out_dir }}"
+
+      - name: Show summary
+        run: |
+          if [ -f "${{ inputs.out_dir }}/compare_summary.csv" ]; then
+            python -c "import pandas as pd; df = pd.read_csv(r'${{ inputs.out_dir }}/compare_summary.csv'); print(df.to_string(index=False))"
+          else
+            echo "compare_summary.csv not found"
+            exit 1
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: compare-yf-vs-proxy-${{ github.run_number }}
+          if-no-files-found: error
+          path: |
+            ${{ inputs.out_dir }}/
