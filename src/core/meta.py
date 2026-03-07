@@ -128,8 +128,8 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     - soxx_admission_filter:
         SOXX가 rank1이어도 단기 상태가 안 좋으면 SOXL 대신 대체자산(기본 USD_MIX) 사용
     - sgov_exit_assist:
-        bull 상태인데 목표 보유가 다시 방어자산만 나올 때,
-        QQQ/SPY가 각자 MA 위면 더 강한 쪽으로 재진입 보조
+        최종 목표가 방어자산만일 때,
+        QQQ/SPY 중 전일 기준 MA 위에 있는 자산이 있으면 더 강한 쪽으로 재진입 보조
     """
     prices = prices.copy()
     returns = prices.pct_change().fillna(0.0)
@@ -215,7 +215,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     # ---- SGOV exit assist config ----
     sea_cfg = (cfg.get("sgov_exit_assist", {}) or {})
     sea_enabled = bool(sea_cfg.get("enabled", False))
-    sea_apply_only_bull = bool(sea_cfg.get("apply_only_bull", True))
+    sea_apply_only_bull = bool(sea_cfg.get("apply_only_bull", False))
     sea_qqq_ma_days = int(sea_cfg.get("qqq_ma_days", 50))
     sea_spy_ma_days = int(sea_cfg.get("spy_ma_days", 50))
     sea_require_positive_mom = bool(sea_cfg.get("require_positive_mom", False))
@@ -580,7 +580,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                         rb_ma_prev = float(ma_prev)
                         rb_mom_prev = float(mom_prev)
 
-        # ---- SGOV exit assist ----
+        # ---- SGOV exit assist (simplified) ----
         sea_hit = False
         sea_selected_under = ""
         sea_selected_trade = ""
@@ -590,11 +590,11 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         sea_spy_ma_prev = float("nan")
 
         if sea_enabled and not asset_crash_hit:
-            bull_ok = True
+            state_ok = True
             if sea_apply_only_bull:
-                bull_ok = (st.lower() == "bull")
+                state_ok = (st.lower() == "bull")
 
-            if bull_ok and len(h_des) > 0 and set(h_des.keys()).issubset(defensive_keys) and w_tr > 0:
+            if state_ok and len(h_des) > 0 and set(h_des.keys()).issubset(defensive_keys):
                 assist_candidates = []
 
                 if "QQQ" in prices.columns and qqq_exit_ma is not None:
