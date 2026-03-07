@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import importlib.util
 import json
 from pathlib import Path
 from typing import Any
@@ -9,7 +10,35 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from src.core.meta import run_meta_portfolio
+
+def load_run_meta_portfolio():
+    candidates = [
+        Path("src/core/meta.py")
+    ]
+
+    for path in candidates:
+        if not path.exists():
+            continue
+
+        spec = importlib.util.spec_from_file_location(f"_meta_mod_{path.stem}", path)
+        if spec is None or spec.loader is None:
+            continue
+
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+
+        fn = getattr(mod, "run_meta_portfolio", None)
+        if fn is not None:
+            return fn, str(path)
+
+    searched = "\n".join(str(p) for p in candidates)
+    raise ModuleNotFoundError(
+        "Could not find run_meta_portfolio in any known location.\n"
+        f"Searched:\n{searched}"
+    )
+
+
+RUN_META_PORTFOLIO, RUN_META_PORTFOLIO_PATH = load_run_meta_portfolio()
 
 
 def unwrap_singletons(obj: Any) -> Any:
@@ -20,6 +49,37 @@ def unwrap_singletons(obj: Any) -> Any:
             return unwrap_singletons(obj[0])
         return [unwrap_singletons(x) for x in obj]
     return obj
+
+
+def ensure_dataframe(x: Any) -> pd.DataFrame:
+    if isinstance(x, pd.DataFrame):
+        return x.copy()
+    if isinstance(x, list):
+        return pd.DataFrame(x)
+    if x is None:
+        return pd.DataFrame()
+    if isinstance(x, dict):
+        return pd.DataFrame([x])
+    return pd.DataFrame(x)
+
+
+def run_meta_safe(prices: pd.DataFrame, cfg: dict) -> tuple[pd.Series, pd.DataFrame]:
+    result = RUN_META_PORTFOLIO(prices, cfg)
+
+    if not isinstance(result, tuple):
+        raise ValueError("run_meta_portfolio must return a tuple")
+
+    if len(result) < 2:
+        raise ValueError("run_meta_portfolio returned too few values")
+
+    equity = result[0]
+    meta_log = result[1]
+
+    if not isinstance(equity, pd.Series):
+        equity = pd.Series(equity, index=prices.index[: len(equity)], name="equity")
+
+    meta_log_df = ensure_dataframe(meta_log)
+    return equity, meta_log_df
 
 
 def compute_recovery_stats(equity: pd.Series) -> dict[str, float]:
@@ -298,19 +358,14 @@ def prepare_mode_price_frames(
 
     actual_prices = prices.loc[common_idx].copy()
 
-    # mode1: D-1 official close로 신호 계산 -> D일 종가 체결
-    # 현재 엔진은 "그 날짜에 계산해서 그 날짜 종가에 리밸런싱" 구조라
-    # 신호용 종가를 1일 shift 해서 넣으면 실행시점이 D+1 의미가 된다.
     mode1_prices = actual_prices.copy()
     for s in signal_symbols:
         mode1_prices[s] = actual_prices[s].shift(1)
 
-    # mode2: D일 15:50 proxy close로 신호 계산 -> D일 종가 체결
     mode2_prices = actual_prices.copy()
     for s in signal_symbols:
         mode2_prices[s] = proxy.loc[common_idx, s].astype(float).values
 
-    # 첫날은 mode1 shift 때문에 NaN이 생기므로 제거
     valid_idx = mode1_prices.dropna(subset=signal_symbols).index
     valid_idx = valid_idx.intersection(mode2_prices.dropna(subset=signal_symbols).index)
 
@@ -357,8 +412,6 @@ def main() -> None:
         end_date=args.end_date,
     )
 
-    # 메타/브랜치 모두 trade return은 actual_prices의 trade columns를 사용하고
-    # signal columns(QQQ/SPY/SOXX)만 mode1/mode2에 맞게 다르게 준다.
     meta_prices_1 = actual_prices.copy()
     meta_prices_2 = actual_prices.copy()
     for s in symbols:
@@ -371,11 +424,9 @@ def main() -> None:
         branch_prices_1[s] = mode1_signal_prices[s]
         branch_prices_2[s] = mode2_signal_prices[s]
 
-    # Meta
-    meta_eq_1, meta_log_1, _, _, _ = run_meta_portfolio(meta_prices_1, meta_cfg)
-    meta_eq_2, meta_log_2, _, _, _ = run_meta_portfolio(meta_prices_2, meta_cfg)
+    meta_eq_1, meta_log_1 = run_meta_safe(meta_prices_1, meta_cfg)
+    meta_eq_2, meta_log_2 = run_meta_safe(meta_prices_2, meta_cfg)
 
-    # Branch5A
     branch_eq_1, branch_log_1 = run_branch5a(
         prices=branch_prices_1,
         lookback=126,
@@ -393,7 +444,6 @@ def main() -> None:
         sell_cost=0.0005,
     )
 
-    # Hybrid 70/30
     hybrid_eq_1 = build_hybrid_equity(meta_eq_1, branch_eq_1, core_weight=0.70, satellite_weight=0.30)
     hybrid_eq_2 = build_hybrid_equity(meta_eq_2, branch_eq_2, core_weight=0.70, satellite_weight=0.30)
 
@@ -470,6 +520,7 @@ def main() -> None:
         "rows_mode2": int(len(mode2_signal_prices)),
         "mode1_definition": "official close signal shifted by 1 trading day, executed at current day close",
         "mode2_definition": "15:50 ET proxy signal same day, executed at current day close",
+        "run_meta_portfolio_loaded_from": RUN_META_PORTFOLIO_PATH,
     }
     with open(out_dir / "run_info.json", "w", encoding="utf-8") as f:
         json.dump(info, f, ensure_ascii=False, indent=2)
