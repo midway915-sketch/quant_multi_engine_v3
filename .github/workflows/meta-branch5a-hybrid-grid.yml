@@ -120,20 +120,8 @@ jobs:
       - name: Run hybrid ratio grid
         run: |
           mkdir -p "${{ inputs.hybrid_out_dir }}"
-          META_EQUITY=$(python - <<'PY'
-            import json
-            with open("out/best_meta.json", "r", encoding="utf-8") as f:
-                d = json.load(f)
-            print(d["equity_path"])
-            PY
-            )
-                      BRANCH5A_EQUITY=$(python - <<'PY'
-            import json
-            with open("out/best_branch5a.json", "r", encoding="utf-8") as f:
-                d = json.load(f)
-            print(d["equity_path"])
-            PY
-            )
+          META_EQUITY=$(python -c "import json; print(json.load(open('out/best_meta.json', encoding='utf-8'))['equity_path'])")
+          BRANCH5A_EQUITY=$(python -c "import json; print(json.load(open('out/best_branch5a.json', encoding='utf-8'))['equity_path'])")
           python -m scripts.run_grid_hybrid_ratio \
             --core-equity-csv "${META_EQUITY}" \
             --satellite-equity-csv "${BRANCH5A_EQUITY}" \
