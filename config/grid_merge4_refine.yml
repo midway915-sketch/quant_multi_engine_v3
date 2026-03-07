@@ -66,6 +66,15 @@ soxx_deleverage:
   replacement: ["USD_MIX"]
   apply_only_bull: [false]
 
+recovery_boost:
+  enabled: [false, true]
+  dd_enter: [-0.20]
+  qqq_ma_days: [20]
+  qqq_mom_days: [20]
+  from_assets:
+    - ["SGOV_MIX", "QLD_MIX"]
+  to_asset: ["TQQQ_MIX"]
+
 allocator:
   bull:   {trend: [1.00], meanrev: [0.00], defensive: [0.00]}
   bear:   {trend: [0.00], meanrev: [0.00], defensive: [1.00]}
