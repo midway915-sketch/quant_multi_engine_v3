@@ -12,6 +12,19 @@ on:
         required: true
         default: "config/grid_merge4_refine.yml"
 
+      meta_best_method:
+        description: "기존 멀티엔진 best 선정 방식: cagr / recovery / balanced"
+        required: true
+        default: "cagr"
+      meta_balanced_mdd_weight:
+        description: "meta balanced용 MDD 가중치"
+        required: true
+        default: "0.35"
+      meta_balanced_recovery_weight:
+        description: "meta balanced용 recovery 가중치"
+        required: true
+        default: "0.00015"
+
       branch5a_start:
         description: "yfinance start date for branch5A"
         required: true
@@ -25,6 +38,20 @@ on:
         description: "branch5A grid config"
         required: true
         default: "config/grid_branch5a.yml"
+
+      branch5a_best_method:
+        description: "branch5A best 선정 방식: cagr / recovery / balanced"
+        required: true
+        default: "cagr"
+      branch5a_balanced_mdd_weight:
+        description: "branch5A balanced용 MDD 가중치"
+        required: true
+        default: "0.35"
+      branch5a_balanced_recovery_weight:
+        description: "branch5A balanced용 recovery 가중치"
+        required: true
+        default: "0.00015"
+
       hybrid_grid_path:
         description: "hybrid ratio grid config"
         required: true
@@ -43,12 +70,13 @@ on:
         required: true
         default: "out/hybrid_ratio_grid"
 
-jobs:
-  run-all:
-    runs-on: ubuntu-latest
     env:
       PYTHONUNBUFFERED: "1"
       PYTHONPATH: ${{ github.workspace }}
+
+jobs:
+  run-all:
+    runs-on: ubuntu-latest
 
     steps:
       - name: Checkout
@@ -65,7 +93,6 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install yfinance pandas numpy pyyaml
 
-      # 1) 기존 멀티엔진 실행
       - name: Run existing meta strategy
         run: |
           mkdir -p "${{ inputs.meta_out_dir }}"
@@ -74,15 +101,16 @@ jobs:
             --grid "${{ inputs.meta_grid_path }}" \
             --out "${{ inputs.meta_out_dir }}"
 
-      # 2) 기존 멀티엔진 best equity 자동 선택
       - name: Select best meta equity path
         run: |
           python -m scripts.select_best_meta_equity_path \
             --summary-csv "${{ inputs.meta_out_dir }}/summary.csv" \
             --runs-root "${{ inputs.meta_out_dir }}" \
-            --out-json out/best_meta.json
+            --out-json out/best_meta.json \
+            --method "${{ inputs.meta_best_method }}" \
+            --balanced-mdd-weight "${{ inputs.meta_balanced_mdd_weight }}" \
+            --balanced-recovery-weight "${{ inputs.meta_balanced_recovery_weight }}"
 
-      # 3) 브랜치5A용 가격 다운로드
       - name: Download branch5A prices from yfinance
         run: |
           mkdir -p out/prep_branch5a
@@ -97,7 +125,6 @@ jobs:
               --start "${{ inputs.branch5a_start }}"
           fi
 
-      # 4) 브랜치5A 그리드 실행
       - name: Run branch5A grid
         run: |
           mkdir -p "${{ inputs.branch5a_out_dir }}"
@@ -108,15 +135,16 @@ jobs:
             --buy-cost 0.0005 \
             --sell-cost 0.0005
 
-      # 5) 브랜치5A best equity 자동 선택
       - name: Select best branch5A equity path
         run: |
           python -m scripts.select_best_equity_path \
             --summary-csv "${{ inputs.branch5a_out_dir }}/summary_merged.csv" \
             --runs-root "${{ inputs.branch5a_out_dir }}" \
-            --out-json out/best_branch5a.json
+            --out-json out/best_branch5a.json \
+            --method "${{ inputs.branch5a_best_method }}" \
+            --balanced-mdd-weight "${{ inputs.branch5a_balanced_mdd_weight }}" \
+            --balanced-recovery-weight "${{ inputs.branch5a_balanced_recovery_weight }}"
 
-      # 6) hybrid 실행
       - name: Run hybrid ratio grid
         run: |
           mkdir -p "${{ inputs.hybrid_out_dir }}"
