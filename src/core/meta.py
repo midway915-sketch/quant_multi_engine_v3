@@ -55,7 +55,6 @@ def _trend_trade_col(ticker: str, leverage_mode: str) -> str:
             return "USD_MIX"
         return ticker
 
-    # default: 3x
     if ticker == "QQQ":
         return "TQQQ_MIX"
     if ticker == "SPY":
@@ -66,7 +65,6 @@ def _trend_trade_col(ticker: str, leverage_mode: str) -> str:
 
 
 def _meanrev_universe_to_trade_col(ticker: str) -> str:
-    # MeanRev는 2x MIX (기존 유지)
     if ticker == "QQQ":
         return "QLD_MIX"
     if ticker == "SPY":
@@ -123,10 +121,10 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     추가:
     - 기존 global crash(state_df 기반)는 그대로 유지
     - asset_crash: 현재 보유 중인 자산의 underlying 기준 개별 판정
-    - soxx_deleverage:
-        SOXL_MIX를 오래 보유 + SOXX가 MA 아래이면
-        다음날 SOXL_MIX 대신 USD_MIX로 대체
-        (조건 해제되면 다시 SOXL_MIX 복귀, 락 없음)
+    - recovery_boost:
+        포트폴리오가 큰 DD 상태일 때,
+        원래 내일 보유가 SGOV_MIX 또는 QLD_MIX면
+        QQQ 회복 확인 시 TQQQ_MIX로 승격
     """
     prices = prices.copy()
     returns = prices.pct_change().fillna(0.0)
@@ -173,17 +171,22 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             lb = int(rule["lookback_days"])
             _under_rets[(under, lb)] = prices[under].pct_change(lb).shift(1)
 
-    # ---- SOXX deleverage config ----
-    soxx_del_cfg = (cfg.get("soxx_deleverage", {}) or {})
-    soxx_del_enabled = bool(soxx_del_cfg.get("enabled", False))
-    soxx_del_min_hold_days = int(soxx_del_cfg.get("min_hold_days", 50))
-    soxx_del_ma_days = int(soxx_del_cfg.get("ma_days", 20))
-    soxx_del_replacement = str(soxx_del_cfg.get("replacement", "USD_MIX"))
-    soxx_del_apply_only_bull = bool(soxx_del_cfg.get("apply_only_bull", False))
+    # ---- Recovery boost config ----
+    rb_cfg = (cfg.get("recovery_boost", {}) or {})
+    rb_enabled = bool(rb_cfg.get("enabled", False))
+    rb_dd_enter = float(rb_cfg.get("dd_enter", -0.20))
+    rb_qqq_ma_days = int(rb_cfg.get("qqq_ma_days", 20))
+    rb_qqq_mom_days = int(rb_cfg.get("qqq_mom_days", 20))
+    rb_from_assets = rb_cfg.get("from_assets", ["SGOV_MIX", "QLD_MIX"])
+    if isinstance(rb_from_assets, str):
+        rb_from_assets = [rb_from_assets]
+    rb_to_asset = str(rb_cfg.get("to_asset", "TQQQ_MIX"))
 
-    soxx_ma = None
-    if "SOXX" in prices.columns:
-        soxx_ma = prices["SOXX"].rolling(soxx_del_ma_days).mean()
+    qqq_ma = None
+    qqq_mom = None
+    if "QQQ" in prices.columns:
+        qqq_ma = prices["QQQ"].rolling(rb_qqq_ma_days).mean()
+        qqq_mom = prices["QQQ"].pct_change(rb_qqq_mom_days)
 
     # ---- Costs ----
     costs_cfg = cfg.get("costs", {}) or {}
@@ -227,7 +230,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     # ---- SOXX gate config ----
     soxx_gate = (cfg.get("soxx_gate", {}) or {})
     soxx_gate_enabled = bool(soxx_gate.get("enabled", False))
-    soxx_gate_mode = str(soxx_gate.get("mode", "mom")).lower().strip()  # "mom" | "ma"
+    soxx_gate_mode = str(soxx_gate.get("mode", "mom")).lower().strip()
     soxx_gate_mom_lb = int(soxx_gate.get("mom_lookback_days", 20))
     soxx_gate_mom_thr = float(soxx_gate.get("mom_threshold", 0.0))
     soxx_gate_ma_days = int(soxx_gate.get("ma_days", 50))
@@ -269,7 +272,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     else:
         reb_dates = fridays
 
-    # weekly close (reporting)
     wclose = _weekly_close(prices)
 
     def get_week_ret(ticker_col: str, wk_end: pd.Timestamp) -> float:
@@ -294,26 +296,20 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     mr_days = 0
     mr_trade_col = None
 
-    # --- Holdings ---
+    # --- Holdings / equity ---
     h_cur = {"SHY": 1.0}
     equity = 1.0
     curve = []
     engine_choice_log = []
     holdings_daily_rows = []
 
-    # SOXL 연속 보유일수 추적
-    soxl_hold_streak = 0
+    # recovery boost용 high-water mark 추적
+    equity_peak = equity
 
     idx = prices.index
 
     for i, dt in enumerate(idx):
         st = state_df.loc[dt, "state"]
-
-        # 현재 보유 기준 SOXL 연속 보유일수 업데이트
-        if float(h_cur.get("SOXL_MIX", 0.0)) > 1e-12:
-            soxl_hold_streak += 1
-        else:
-            soxl_hold_streak = 0
 
         # 1) today return using h_cur
         for t, w in h_cur.items():
@@ -327,6 +323,8 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                 daily_ret += float(returns.loc[dt, t]) * float(w)
 
         equity *= (1.0 + daily_ret)
+        equity_peak = max(equity_peak, equity)
+        equity_dd = float(equity / equity_peak - 1.0) if equity_peak > 0 else 0.0
 
         # 2) signals -> h_des for tomorrow
         rebalance_today = bool(dt in reb_dates)
@@ -450,8 +448,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         w_mr = float(alloc[st_key]["meanrev"])
         w_df = float(alloc[st_key]["defensive"])
 
-        # global crash는 이미 state에 반영되어 있음
-        # asset_crash_hit이면 내일 목표 비중은 defensive 100%로 override
         if asset_crash_hit:
             w_tr = 0.0
             w_mr = 0.0
@@ -477,33 +473,37 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             for t, w in df_w.items():
                 h_des[t] = h_des.get(t, 0.0) + (w_df * float(w))
 
-        # ---- SOXX deleverage override ----
-        soxx_del_hit = False
-        soxx_del_price = float("nan")
-        soxx_del_ma_value = float("nan")
+        # ---- Recovery boost override ----
+        rb_hit = False
+        rb_price_prev = float("nan")
+        rb_ma_prev = float("nan")
+        rb_mom_prev = float("nan")
+        rb_from_asset_hit = ""
 
-        if soxx_del_enabled and ("SOXL_MIX" in h_des) and ("SOXX" in prices.columns) and (soxx_ma is not None):
-            apply_ok = True
-            if soxx_del_apply_only_bull:
-                apply_ok = (st.lower() == "bull")
+        if rb_enabled and ("QQQ" in prices.columns) and (qqq_ma is not None) and (qqq_mom is not None):
+            px_prev = prices["QQQ"].shift(1).loc[dt]
+            ma_prev = qqq_ma.shift(1).loc[dt]
+            mom_prev = qqq_mom.shift(1).loc[dt]
 
-            px_prev = prices["SOXX"].shift(1).loc[dt]
-            ma_prev = soxx_ma.shift(1).loc[dt]
-
-            if (
-                apply_ok
-                and (float(h_des.get("SOXL_MIX", 0.0)) > 1e-12)
-                and (soxl_hold_streak >= soxx_del_min_hold_days)
-                and pd.notna(px_prev)
+            qqq_recovery_ok = (
+                pd.notna(px_prev)
                 and pd.notna(ma_prev)
-                and (float(px_prev) < float(ma_prev))
-            ):
-                w_soxl = float(h_des.pop("SOXL_MIX", 0.0))
-                if w_soxl > 0:
-                    h_des[soxx_del_replacement] = h_des.get(soxx_del_replacement, 0.0) + w_soxl
-                    soxx_del_hit = True
-                    soxx_del_price = float(px_prev)
-                    soxx_del_ma_value = float(ma_prev)
+                and pd.notna(mom_prev)
+                and (float(px_prev) > float(ma_prev))
+                and (float(mom_prev) > 0.0)
+            )
+
+            if equity_dd <= rb_dd_enter and qqq_recovery_ok:
+                for from_asset in rb_from_assets:
+                    w_from = float(h_des.get(from_asset, 0.0))
+                    if w_from > 1e-12:
+                        h_des.pop(from_asset, None)
+                        h_des[rb_to_asset] = h_des.get(rb_to_asset, 0.0) + w_from
+                        rb_hit = True
+                        rb_from_asset_hit = from_asset
+                        rb_price_prev = float(px_prev)
+                        rb_ma_prev = float(ma_prev)
+                        rb_mom_prev = float(mom_prev)
 
         h_des = _normalize_weights(h_des)
         if not h_des:
@@ -533,6 +533,9 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                 "date": str(dt.date()),
                 "state": st,
                 "state_effective": st_key_effective,
+                "equity": float(equity),
+                "equity_peak": float(equity_peak),
+                "equity_dd": float(equity_dd),
                 "w_trend": w_tr,
                 "w_meanrev": w_mr,
                 "w_defensive": w_df,
@@ -552,13 +555,13 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                 "asset_crash_value": (float(asset_crash_value) if pd.notna(asset_crash_value) else np.nan),
                 "asset_crash_lb_used": asset_crash_lb_used,
                 "asset_crash_thr_used": asset_crash_thr_used,
-                "soxl_hold_streak": int(soxl_hold_streak),
-                "soxx_deleverage_hit": bool(soxx_del_hit),
-                "soxx_deleverage_min_hold_days": int(soxx_del_min_hold_days),
-                "soxx_deleverage_ma_days": int(soxx_del_ma_days),
-                "soxx_deleverage_replacement": soxx_del_replacement,
-                "soxx_deleverage_price_prev": (float(soxx_del_price) if pd.notna(soxx_del_price) else np.nan),
-                "soxx_deleverage_ma_prev": (float(soxx_del_ma_value) if pd.notna(soxx_del_ma_value) else np.nan),
+                "recovery_boost_hit": bool(rb_hit),
+                "recovery_boost_from_asset": rb_from_asset_hit,
+                "recovery_boost_to_asset": rb_to_asset if rb_hit else "",
+                "recovery_boost_dd_enter": float(rb_dd_enter),
+                "recovery_boost_qqq_price_prev": (float(rb_price_prev) if pd.notna(rb_price_prev) else np.nan),
+                "recovery_boost_qqq_ma_prev": (float(rb_ma_prev) if pd.notna(rb_ma_prev) else np.nan),
+                "recovery_boost_qqq_mom_prev": (float(rb_mom_prev) if pd.notna(rb_mom_prev) else np.nan),
             }
         )
 
@@ -566,7 +569,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     picks_df = pd.DataFrame(picks_rows)
     holdings_daily = pd.DataFrame(holdings_daily_rows)
 
-    # holdings_weekly (avg weights within each W-FRI week)
     if not holdings_daily.empty:
         hd = holdings_daily.copy()
         hd["date"] = pd.to_datetime(hd["date"])
@@ -577,8 +579,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         wk_avg = wk_avg[wk_avg["avg_weight"] > 0]
     else:
         wk_avg = pd.DataFrame(columns=["week_end", "ticker", "avg_weight"])
-
-    wclose = _weekly_close(prices)
 
     def wk_ret_col(ticker: str, wk_end_ts: pd.Timestamp) -> float:
         if ticker not in wclose.columns or wk_end_ts not in wclose.index:
