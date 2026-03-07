@@ -49,8 +49,7 @@ asset_crash:
     enabled: [false, true]
     lookback_days: [10]
     threshold: [-0.05]
-"""
-"""
+
   qqq:
     enabled: [false, true]
     lookback_days: [12]
@@ -69,9 +68,7 @@ soxx_deleverage:
   ma_days: [20]
   replacement: ["USD_MIX"]
   apply_only_bull: [false]
-"""
 
-"""
 recovery_boost:
   enabled: [false, true]
   dd_enter: [-0.20]
@@ -80,9 +77,7 @@ recovery_boost:
   from_assets:
     - ["SGOV_MIX", "QLD_MIX"]
   to_asset: ["TQQQ_MIX"]
-"""
 
-"""
 soxx_admission_filter:
   enabled: [false, true]
   ret20_positive_required: [true]
@@ -92,9 +87,7 @@ soxx_admission_filter:
   ma50_days: [50]
   replacement_if_blocked: ["USD_MIX"]
   apply_only_rank1: [true]
-"""
 
-"""
 sgov_exit_assist:
   enabled: [false, true]
   apply_only_bull: [false]
