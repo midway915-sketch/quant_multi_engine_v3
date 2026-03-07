@@ -45,17 +45,17 @@ costs:
 
 asset_crash:
   spy:
-    enabled: [true]
+    enabled: [false, true]
     lookback_days: [10]
     threshold: [-0.05]
 
   qqq:
-    enabled: [true]
+    enabled: [false, true]
     lookback_days: [12]
     threshold: [-0.07]
 
   soxx:
-    enabled: [true]
+    enabled: [false, true]
     lookback_days: [4]
     threshold: [-0.09]
 
