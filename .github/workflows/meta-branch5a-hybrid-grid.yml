@@ -1,0 +1,154 @@
+name: meta-branch5a-hybrid-grid
+
+on:
+  workflow_dispatch:
+    inputs:
+      meta_config_path:
+        description: "기존 멀티엔진 base config"
+        required: true
+        default: "config/default_stress_costs.yml"
+      meta_grid_path:
+        description: "기존 멀티엔진 grid config"
+        required: true
+        default: "config/grid_merge4_refine.yml"
+
+      branch5a_start:
+        description: "yfinance start date for branch5A"
+        required: true
+        default: "2000-01-01"
+      branch5a_end:
+        description: "yfinance end date for branch5A (blank=today)"
+        required: false
+        default: ""
+
+      branch5a_grid_path:
+        description: "branch5A grid config"
+        required: true
+        default: "config/grid_branch5a.yml"
+      hybrid_grid_path:
+        description: "hybrid ratio grid config"
+        required: true
+        default: "config/grid_hybrid_ratio.yml"
+
+      meta_out_dir:
+        description: "meta output dir"
+        required: true
+        default: "out/meta_best"
+      branch5a_out_dir:
+        description: "branch5A output dir"
+        required: true
+        default: "out/grid_branch5a"
+      hybrid_out_dir:
+        description: "hybrid output dir"
+        required: true
+        default: "out/hybrid_ratio_grid"
+
+jobs:
+  run-all:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install yfinance pandas numpy pyyaml
+
+      # 1) 기존 멀티엔진 실행
+      - name: Run existing meta strategy
+        run: |
+          mkdir -p "${{ inputs.meta_out_dir }}"
+          python -m scripts.run_grid \
+            --config "${{ inputs.meta_config_path }}" \
+            --grid "${{ inputs.meta_grid_path }}" \
+            --out "${{ inputs.meta_out_dir }}"
+
+      # 2) 기존 멀티엔진 best equity 자동 선택
+      - name: Select best meta equity path
+        run: |
+          python -m scripts.select_best_meta_equity_path \
+            --summary-csv "${{ inputs.meta_out_dir }}/summary.csv" \
+            --runs-root "${{ inputs.meta_out_dir }}" \
+            --out-json out/best_meta.json
+
+      # 3) 브랜치5A용 가격 다운로드
+      - name: Download branch5A prices from yfinance
+        run: |
+          mkdir -p out/prep_branch5a
+          if [ -n "${{ inputs.branch5a_end }}" ]; then
+            python -m scripts.download_branch5a_prices \
+              --out-csv out/prep_branch5a/prices.csv \
+              --start "${{ inputs.branch5a_start }}" \
+              --end "${{ inputs.branch5a_end }}"
+          else
+            python -m scripts.download_branch5a_prices \
+              --out-csv out/prep_branch5a/prices.csv \
+              --start "${{ inputs.branch5a_start }}"
+          fi
+
+      # 4) 브랜치5A 그리드 실행
+      - name: Run branch5A grid
+        run: |
+          mkdir -p "${{ inputs.branch5a_out_dir }}"
+          python -m scripts.run_grid_branch5a \
+            --prices-csv out/prep_branch5a/prices.csv \
+            --grid-yaml "${{ inputs.branch5a_grid_path }}" \
+            --out-dir "${{ inputs.branch5a_out_dir }}" \
+            --buy-cost 0.0005 \
+            --sell-cost 0.0005
+
+      # 5) 브랜치5A best equity 자동 선택
+      - name: Select best branch5A equity path
+        run: |
+          python -m scripts.select_best_equity_path \
+            --summary-csv "${{ inputs.branch5a_out_dir }}/summary_merged.csv" \
+            --runs-root "${{ inputs.branch5a_out_dir }}" \
+            --out-json out/best_branch5a.json
+
+      # 6) hybrid 실행
+      - name: Run hybrid ratio grid
+        run: |
+          mkdir -p "${{ inputs.hybrid_out_dir }}"
+          META_EQUITY=$(python - <<'PY'
+            import json
+            with open("out/best_meta.json", "r", encoding="utf-8") as f:
+                d = json.load(f)
+            print(d["equity_path"])
+            PY
+            )
+                      BRANCH5A_EQUITY=$(python - <<'PY'
+            import json
+            with open("out/best_branch5a.json", "r", encoding="utf-8") as f:
+                d = json.load(f)
+            print(d["equity_path"])
+            PY
+            )
+          python -m scripts.run_grid_hybrid_ratio \
+            --core-equity-csv "${META_EQUITY}" \
+            --satellite-equity-csv "${BRANCH5A_EQUITY}" \
+            --grid-yaml "${{ inputs.hybrid_grid_path }}" \
+            --out-dir "${{ inputs.hybrid_out_dir }}"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: meta-branch5a-hybrid-results
+          if-no-files-found: error
+          path: |
+            out/prep_branch5a/prices.csv
+            out/best_meta.json
+            out/best_branch5a.json
+            ${{ inputs.meta_out_dir }}/
+            ${{ inputs.branch5a_out_dir }}/
+            ${{ inputs.hybrid_out_dir }}/
