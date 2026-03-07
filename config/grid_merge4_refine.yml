@@ -44,7 +44,12 @@ costs:
   sell: [0.0020]
 
 asset_crash:
-"""
+  soxx:
+    enabled: [true]
+    lookback_days: [4]
+    threshold: [-0.09]
+    
+  """
   spy:
     enabled: [false, true]
     lookback_days: [10]
@@ -54,12 +59,7 @@ asset_crash:
     enabled: [false, true]
     lookback_days: [12]
     threshold: [-0.07]
-"""
-
-  soxx:
-    enabled: [true]
-    lookback_days: [4]
-    threshold: [-0.09]
+  """
 
 """
 soxx_deleverage:
