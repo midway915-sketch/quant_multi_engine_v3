@@ -1,0 +1,100 @@
+name: download-twelvedata-snapshots
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: 'comma-separated symbols'
+        required: true
+        default: 'QQQ,SPY,SOXX'
+      start_date:
+        description: 'YYYY-MM-DD'
+        required: true
+        default: '2022-04-01'
+      end_date:
+        description: 'YYYY-MM-DD'
+        required: true
+        default: '2022-09-30'
+      interval:
+        description: 'interval'
+        required: true
+        default: '1min'
+      timezone:
+        description: 'timezone'
+        required: true
+        default: 'America/New_York'
+      snapshot_times:
+        description: 'comma-separated ET times'
+        required: true
+        default: '15:45:00,15:50:00,15:54:00'
+      pause_seconds:
+        description: 'pause seconds between requests'
+        required: true
+        default: '8.0'
+      security_type:
+        description: 'security type'
+        required: true
+        default: 'ETF'
+      out_dir:
+        description: 'output directory'
+        required: true
+        default: 'data/twelvedata_snapshots'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      TWELVEDATA_API_KEY: ${{ secrets.TWELVEDATA_API_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests
+
+      - name: Validate secret
+        run: |
+          if [ -z "${TWELVEDATA_API_KEY}" ]; then
+            echo "TWELVEDATA_API_KEY secret is missing"
+            exit 1
+          fi
+
+      - name: Run snapshot downloader
+        run: |
+          mkdir -p "${{ inputs.out_dir }}"
+          python tools/download_twelvedata_snapshots.py \
+            --api-key "${TWELVEDATA_API_KEY}" \
+            --symbols "${{ inputs.symbols }}" \
+            --start-date "${{ inputs.start_date }}" \
+            --end-date "${{ inputs.end_date }}" \
+            --interval "${{ inputs.interval }}" \
+            --timezone "${{ inputs.timezone }}" \
+            --snapshot-times "${{ inputs.snapshot_times }}" \
+            --pause-seconds "${{ inputs.pause_seconds }}" \
+            --type "${{ inputs.security_type }}" \
+            --out-dir "${{ inputs.out_dir }}"
+
+      - name: Show manifest
+        run: |
+          if [ -f "${{ inputs.out_dir }}/manifest.csv" ]; then
+            python -c "import pandas as pd; df = pd.read_csv(r'${{ inputs.out_dir }}/manifest.csv'); print(df.head(50).to_string(index=False))"
+          else
+            echo "manifest.csv not found"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: twelvedata-snapshots-${{ github.run_number }}
+          if-no-files-found: error
+          path: |
+            ${{ inputs.out_dir }}/
