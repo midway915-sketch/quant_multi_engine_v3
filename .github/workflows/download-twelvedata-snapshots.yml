@@ -10,11 +10,11 @@ on:
       start_date:
         description: 'YYYY-MM-DD'
         required: true
-        default: '2022-04-01'
+        default: '2020-01-01'
       end_date:
         description: 'YYYY-MM-DD'
         required: true
-        default: '2022-09-30'
+        default: '2023-12-31'
       interval:
         description: 'interval'
         required: true
@@ -30,11 +30,15 @@ on:
       pause_seconds:
         description: 'pause seconds between requests'
         required: true
-        default: '8.0'
+        default: '10.0'
       security_type:
         description: 'security type'
         required: true
         default: 'ETF'
+      chunk_days:
+        description: 'days per request chunk'
+        required: true
+        default: '10'
       out_dir:
         description: 'output directory'
         required: true
@@ -81,12 +85,13 @@ jobs:
             --snapshot-times "${{ inputs.snapshot_times }}" \
             --pause-seconds "${{ inputs.pause_seconds }}" \
             --type "${{ inputs.security_type }}" \
+            --chunk-days "${{ inputs.chunk_days }}" \
             --out-dir "${{ inputs.out_dir }}"
 
       - name: Show manifest
         run: |
           if [ -f "${{ inputs.out_dir }}/manifest.csv" ]; then
-            python -c "import pandas as pd; df = pd.read_csv(r'${{ inputs.out_dir }}/manifest.csv'); print(df.head(50).to_string(index=False))"
+            python -c "import pandas as pd; df = pd.read_csv(r'${{ inputs.out_dir }}/manifest.csv'); print(df.head(100).to_string(index=False))"
           else
             echo "manifest.csv not found"
           fi
