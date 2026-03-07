@@ -125,6 +125,11 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         포트폴리오가 큰 DD 상태일 때,
         원래 내일 보유가 SGOV_MIX 또는 QLD_MIX면
         QQQ 회복 확인 시 TQQQ_MIX로 승격
+    - soxx_admission_filter:
+        SOXX가 rank1이어도 단기 상태가 안 좋으면 SOXL 대신 대체자산(기본 USD_MIX) 사용
+    - sgov_exit_assist:
+        bull 상태인데 목표 보유가 다시 방어자산만 나올 때,
+        QQQ/SPY가 각자 MA 위면 더 강한 쪽으로 재진입 보조
     """
     prices = prices.copy()
     returns = prices.pct_change().fillna(0.0)
@@ -188,6 +193,36 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         qqq_ma = prices["QQQ"].rolling(rb_qqq_ma_days).mean()
         qqq_mom = prices["QQQ"].pct_change(rb_qqq_mom_days)
 
+    # ---- SOXX admission filter config ----
+    saf_cfg = (cfg.get("soxx_admission_filter", {}) or {})
+    saf_enabled = bool(saf_cfg.get("enabled", False))
+    saf_ret20_positive_required = bool(saf_cfg.get("ret20_positive_required", True))
+    saf_ret20_days = int(saf_cfg.get("ret20_days", 20))
+    saf_ma20_above_ma50_required = bool(saf_cfg.get("ma20_above_ma50_required", True))
+    saf_ma20_days = int(saf_cfg.get("ma20_days", 20))
+    saf_ma50_days = int(saf_cfg.get("ma50_days", 50))
+    saf_replacement_if_blocked = str(saf_cfg.get("replacement_if_blocked", "USD_MIX"))
+    saf_apply_only_rank1 = bool(saf_cfg.get("apply_only_rank1", True))
+
+    soxx_ret20 = None
+    soxx_ma20 = None
+    soxx_ma50 = None
+    if "SOXX" in prices.columns:
+        soxx_ret20 = prices["SOXX"].pct_change(saf_ret20_days)
+        soxx_ma20 = prices["SOXX"].rolling(saf_ma20_days).mean()
+        soxx_ma50 = prices["SOXX"].rolling(saf_ma50_days).mean()
+
+    # ---- SGOV exit assist config ----
+    sea_cfg = (cfg.get("sgov_exit_assist", {}) or {})
+    sea_enabled = bool(sea_cfg.get("enabled", False))
+    sea_apply_only_bull = bool(sea_cfg.get("apply_only_bull", True))
+    sea_qqq_ma_days = int(sea_cfg.get("qqq_ma_days", 50))
+    sea_spy_ma_days = int(sea_cfg.get("spy_ma_days", 50))
+    sea_require_positive_mom = bool(sea_cfg.get("require_positive_mom", False))
+
+    qqq_exit_ma = prices["QQQ"].rolling(sea_qqq_ma_days).mean() if "QQQ" in prices.columns else None
+    spy_exit_ma = prices["SPY"].rolling(sea_spy_ma_days).mean() if "SPY" in prices.columns else None
+
     # ---- Costs ----
     costs_cfg = cfg.get("costs", {}) or {}
     buy_cost = float(costs_cfg.get("buy", 0.0))
@@ -226,6 +261,8 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     risk_off_mode = (cfg.get("risk_off", {}) or {}).get("mode", "SHY_100")
     df_w = _risk_off_weights(risk_off_mode)
     df_w = _normalize_weights(df_w) if df_w else {"SHY": 1.0}
+
+    defensive_keys = set(df_w.keys()) | {"SHY", "BIL_MIX", "SGOV_MIX"}
 
     # ---- SOXX gate config ----
     soxx_gate = (cfg.get("soxx_gate", {}) or {})
@@ -288,6 +325,7 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
 
     # --- Trend picks state ---
     current_trend_tradecols: list[str] = []
+    current_trend_underlyings: list[str] = []
     picks_rows = []
 
     # --- MeanRev state ---
@@ -379,7 +417,8 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                     ranked2 = ranked.drop(index=["SOXX"], errors="ignore")
                     top = list(ranked2.index[:top_n])
 
-            current_trend_tradecols = [_trend_trade_col(t, trend_leverage_mode) for t in top if t is not None]
+            current_trend_underlyings = [t for t in top if t is not None]
+            current_trend_tradecols = [_trend_trade_col(t, trend_leverage_mode) for t in current_trend_underlyings]
 
             wk = _week_end_index(pd.DatetimeIndex([dt]))[0]
             top1 = top[0] if len(top) > 0 else None
@@ -473,6 +512,42 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             for t, w in df_w.items():
                 h_des[t] = h_des.get(t, 0.0) + (w_df * float(w))
 
+        # ---- SOXX admission filter ----
+        saf_hit = False
+        saf_reason = ""
+        saf_ret20_prev = float("nan")
+        saf_ma20_prev = float("nan")
+        saf_ma50_prev = float("nan")
+
+        if saf_enabled and ("SOXL_MIX" in h_des) and ("SOXX" in prices.columns):
+            apply_ok = True
+            if saf_apply_only_rank1:
+                apply_ok = len(current_trend_underlyings) > 0 and current_trend_underlyings[0] == "SOXX"
+
+            block = False
+            if apply_ok:
+                if saf_ret20_positive_required and soxx_ret20 is not None:
+                    ret20_prev = soxx_ret20.shift(1).loc[dt]
+                    saf_ret20_prev = float(ret20_prev) if pd.notna(ret20_prev) else np.nan
+                    if pd.isna(ret20_prev) or not (float(ret20_prev) > 0.0):
+                        block = True
+                        saf_reason = "ret20_not_positive"
+
+                if (not block) and saf_ma20_above_ma50_required and (soxx_ma20 is not None) and (soxx_ma50 is not None):
+                    ma20_prev = soxx_ma20.shift(1).loc[dt]
+                    ma50_prev = soxx_ma50.shift(1).loc[dt]
+                    saf_ma20_prev = float(ma20_prev) if pd.notna(ma20_prev) else np.nan
+                    saf_ma50_prev = float(ma50_prev) if pd.notna(ma50_prev) else np.nan
+                    if pd.isna(ma20_prev) or pd.isna(ma50_prev) or not (float(ma20_prev) > float(ma50_prev)):
+                        block = True
+                        saf_reason = "ma20_not_above_ma50"
+
+            if block:
+                w_soxl = float(h_des.pop("SOXL_MIX", 0.0))
+                if w_soxl > 0:
+                    h_des[saf_replacement_if_blocked] = h_des.get(saf_replacement_if_blocked, 0.0) + w_soxl
+                    saf_hit = True
+
         # ---- Recovery boost override ----
         rb_hit = False
         rb_price_prev = float("nan")
@@ -504,6 +579,53 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                         rb_price_prev = float(px_prev)
                         rb_ma_prev = float(ma_prev)
                         rb_mom_prev = float(mom_prev)
+
+        # ---- SGOV exit assist ----
+        sea_hit = False
+        sea_selected_under = ""
+        sea_selected_trade = ""
+        sea_qqq_px_prev = float("nan")
+        sea_qqq_ma_prev = float("nan")
+        sea_spy_px_prev = float("nan")
+        sea_spy_ma_prev = float("nan")
+
+        if sea_enabled and not asset_crash_hit:
+            bull_ok = True
+            if sea_apply_only_bull:
+                bull_ok = (st.lower() == "bull")
+
+            if bull_ok and len(h_des) > 0 and set(h_des.keys()).issubset(defensive_keys) and w_tr > 0:
+                assist_candidates = []
+
+                if "QQQ" in prices.columns and qqq_exit_ma is not None:
+                    q_px_prev = prices["QQQ"].shift(1).loc[dt]
+                    q_ma_prev = qqq_exit_ma.shift(1).loc[dt]
+                    sea_qqq_px_prev = float(q_px_prev) if pd.notna(q_px_prev) else np.nan
+                    sea_qqq_ma_prev = float(q_ma_prev) if pd.notna(q_ma_prev) else np.nan
+                    if pd.notna(q_px_prev) and pd.notna(q_ma_prev) and (float(q_px_prev) > float(q_ma_prev)):
+                        q_score = mom.loc[dt, "QQQ"] if "QQQ" in mom.columns else np.nan
+                        if (not sea_require_positive_mom) or (pd.notna(q_score) and float(q_score) > 0.0):
+                            assist_candidates.append(("QQQ", float(q_score) if pd.notna(q_score) else -1e18))
+
+                if "SPY" in prices.columns and spy_exit_ma is not None:
+                    s_px_prev = prices["SPY"].shift(1).loc[dt]
+                    s_ma_prev = spy_exit_ma.shift(1).loc[dt]
+                    sea_spy_px_prev = float(s_px_prev) if pd.notna(s_px_prev) else np.nan
+                    sea_spy_ma_prev = float(s_ma_prev) if pd.notna(s_ma_prev) else np.nan
+                    if pd.notna(s_px_prev) and pd.notna(s_ma_prev) and (float(s_px_prev) > float(s_ma_prev)):
+                        s_score = mom.loc[dt, "SPY"] if "SPY" in mom.columns else np.nan
+                        if (not sea_require_positive_mom) or (pd.notna(s_score) and float(s_score) > 0.0):
+                            assist_candidates.append(("SPY", float(s_score) if pd.notna(s_score) else -1e18))
+
+                if len(assist_candidates) > 0:
+                    assist_candidates = sorted(assist_candidates, key=lambda x: x[1], reverse=True)
+                    chosen_under = assist_candidates[0][0]
+                    chosen_trade = _trend_trade_col(chosen_under, trend_leverage_mode)
+
+                    h_des = {chosen_trade: 1.0}
+                    sea_hit = True
+                    sea_selected_under = chosen_under
+                    sea_selected_trade = chosen_trade
 
         h_des = _normalize_weights(h_des)
         if not h_des:
@@ -562,6 +684,19 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                 "recovery_boost_qqq_price_prev": (float(rb_price_prev) if pd.notna(rb_price_prev) else np.nan),
                 "recovery_boost_qqq_ma_prev": (float(rb_ma_prev) if pd.notna(rb_ma_prev) else np.nan),
                 "recovery_boost_qqq_mom_prev": (float(rb_mom_prev) if pd.notna(rb_mom_prev) else np.nan),
+                "soxx_admission_filter_hit": bool(saf_hit),
+                "soxx_admission_filter_reason": saf_reason,
+                "soxx_admission_filter_ret20_prev": saf_ret20_prev,
+                "soxx_admission_filter_ma20_prev": saf_ma20_prev,
+                "soxx_admission_filter_ma50_prev": saf_ma50_prev,
+                "soxx_admission_filter_replacement": saf_replacement_if_blocked if saf_hit else "",
+                "sgov_exit_assist_hit": bool(sea_hit),
+                "sgov_exit_assist_selected_under": sea_selected_under,
+                "sgov_exit_assist_selected_trade": sea_selected_trade,
+                "sgov_exit_assist_qqq_px_prev": sea_qqq_px_prev,
+                "sgov_exit_assist_qqq_ma_prev": sea_qqq_ma_prev,
+                "sgov_exit_assist_spy_px_prev": sea_spy_px_prev,
+                "sgov_exit_assist_spy_ma_prev": sea_spy_ma_prev,
             }
         )
 
