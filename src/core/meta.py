@@ -122,21 +122,11 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
 
     추가:
     - 기존 global crash(state_df 기반)는 그대로 유지
-    - asset_crash는 현재 보유 중인 자산의 underlying 기준으로 개별 판정
-      예)
-        asset_crash:
-          spy:
-            enabled: true
-            lookback_days: 12
-            threshold: -0.08
-          qqq:
-            enabled: true
-            lookback_days: 10
-            threshold: -0.10
-          soxx:
-            enabled: true
-            lookback_days: 6
-            threshold: -0.12
+    - asset_crash: 현재 보유 중인 자산의 underlying 기준 개별 판정
+    - soxx_deleverage:
+        SOXL_MIX를 오래 보유 + SOXX가 MA 아래이면
+        다음날 SOXL_MIX 대신 USD_MIX로 대체
+        (조건 해제되면 다시 SOXL_MIX 복귀, 락 없음)
     """
     prices = prices.copy()
     returns = prices.pct_change().fillna(0.0)
@@ -165,7 +155,6 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         "SOXX": _asset_rule("SOXX"),
     }
 
-    # 현재 보유 trade_col -> underlying
     asset_crash_map = {
         "UPRO_MIX": "SPY",
         "SSO_MIX": "SPY",
@@ -178,12 +167,23 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
         "SOXX": "SOXX",
     }
 
-    # underlying별 lookahead-safe N-day return 사전 계산
     _under_rets = {}
     for under, rule in asset_crash_rules.items():
         if rule["enabled"] and under in prices.columns:
             lb = int(rule["lookback_days"])
             _under_rets[(under, lb)] = prices[under].pct_change(lb).shift(1)
+
+    # ---- SOXX deleverage config ----
+    soxx_del_cfg = (cfg.get("soxx_deleverage", {}) or {})
+    soxx_del_enabled = bool(soxx_del_cfg.get("enabled", False))
+    soxx_del_min_hold_days = int(soxx_del_cfg.get("min_hold_days", 50))
+    soxx_del_ma_days = int(soxx_del_cfg.get("ma_days", 20))
+    soxx_del_replacement = str(soxx_del_cfg.get("replacement", "USD_MIX"))
+    soxx_del_apply_only_bull = bool(soxx_del_cfg.get("apply_only_bull", False))
+
+    soxx_ma = None
+    if "SOXX" in prices.columns:
+        soxx_ma = prices["SOXX"].rolling(soxx_del_ma_days).mean()
 
     # ---- Costs ----
     costs_cfg = cfg.get("costs", {}) or {}
@@ -301,10 +301,19 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
     engine_choice_log = []
     holdings_daily_rows = []
 
+    # SOXL 연속 보유일수 추적
+    soxl_hold_streak = 0
+
     idx = prices.index
 
     for i, dt in enumerate(idx):
         st = state_df.loc[dt, "state"]
+
+        # 현재 보유 기준 SOXL 연속 보유일수 업데이트
+        if float(h_cur.get("SOXL_MIX", 0.0)) > 1e-12:
+            soxl_hold_streak += 1
+        else:
+            soxl_hold_streak = 0
 
         # 1) today return using h_cur
         for t, w in h_cur.items():
@@ -468,6 +477,34 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
             for t, w in df_w.items():
                 h_des[t] = h_des.get(t, 0.0) + (w_df * float(w))
 
+        # ---- SOXX deleverage override ----
+        soxx_del_hit = False
+        soxx_del_price = float("nan")
+        soxx_del_ma_value = float("nan")
+
+        if soxx_del_enabled and ("SOXL_MIX" in h_des) and ("SOXX" in prices.columns) and (soxx_ma is not None):
+            apply_ok = True
+            if soxx_del_apply_only_bull:
+                apply_ok = (st.lower() == "bull")
+
+            px_prev = prices["SOXX"].shift(1).loc[dt]
+            ma_prev = soxx_ma.shift(1).loc[dt]
+
+            if (
+                apply_ok
+                and (float(h_des.get("SOXL_MIX", 0.0)) > 1e-12)
+                and (soxl_hold_streak >= soxx_del_min_hold_days)
+                and pd.notna(px_prev)
+                and pd.notna(ma_prev)
+                and (float(px_prev) < float(ma_prev))
+            ):
+                w_soxl = float(h_des.pop("SOXL_MIX", 0.0))
+                if w_soxl > 0:
+                    h_des[soxx_del_replacement] = h_des.get(soxx_del_replacement, 0.0) + w_soxl
+                    soxx_del_hit = True
+                    soxx_del_price = float(px_prev)
+                    soxx_del_ma_value = float(ma_prev)
+
         h_des = _normalize_weights(h_des)
         if not h_des:
             h_des = {"SHY": 1.0}
@@ -515,6 +552,13 @@ def run_meta_portfolio(prices: pd.DataFrame, cfg: dict):
                 "asset_crash_value": (float(asset_crash_value) if pd.notna(asset_crash_value) else np.nan),
                 "asset_crash_lb_used": asset_crash_lb_used,
                 "asset_crash_thr_used": asset_crash_thr_used,
+                "soxl_hold_streak": int(soxl_hold_streak),
+                "soxx_deleverage_hit": bool(soxx_del_hit),
+                "soxx_deleverage_min_hold_days": int(soxx_del_min_hold_days),
+                "soxx_deleverage_ma_days": int(soxx_del_ma_days),
+                "soxx_deleverage_replacement": soxx_del_replacement,
+                "soxx_deleverage_price_prev": (float(soxx_del_price) if pd.notna(soxx_del_price) else np.nan),
+                "soxx_deleverage_ma_prev": (float(soxx_del_ma_value) if pd.notna(soxx_del_ma_value) else np.nan),
             }
         )
 
