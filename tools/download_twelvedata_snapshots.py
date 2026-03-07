@@ -26,9 +26,10 @@ class Config:
     snapshot_times: list[str]
     pause_seconds: float
     type_: str
+    chunk_days: int
 
 
-def chunk_ranges(start_date: str, end_date: str, chunk_days: int = 30) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
+def chunk_ranges(start_date: str, end_date: str, chunk_days: int = 10) -> list[tuple[pd.Timestamp, pd.Timestamp]]:
     start = pd.Timestamp(start_date)
     end = pd.Timestamp(end_date)
     if end < start:
@@ -62,8 +63,10 @@ def fetch_chunk(
         "order": "ASC",
         "format": "JSON",
         "apikey": api_key,
-        "type": type_,
     }
+
+    if type_:
+        params["type"] = type_
 
     resp = requests.get(API_URL, params=params, timeout=timeout)
     resp.raise_for_status()
@@ -101,6 +104,7 @@ def extract_snapshots(df: pd.DataFrame, symbol: str, snapshot_times: Iterable[st
     out["date"] = out["datetime"].dt.strftime("%Y-%m-%d")
     out["time"] = out["datetime"].dt.strftime("%H:%M:%S")
     out = out[out["time"].isin(set(snapshot_times))].copy()
+
     if out.empty:
         return pd.DataFrame(
             columns=["symbol", "datetime", "date", "time", "open", "high", "low", "close", "volume"]
@@ -110,7 +114,7 @@ def extract_snapshots(df: pd.DataFrame, symbol: str, snapshot_times: Iterable[st
     return out[["symbol", "datetime", "date", "time", "open", "high", "low", "close", "volume"]].reset_index(drop=True)
 
 
-def save_outputs(out_dir: Path, symbol: str, snapshots: pd.DataFrame) -> tuple[Path, Path]:
+def save_outputs(out_dir: Path, symbol: str, snapshots: pd.DataFrame, snapshot_times: list[str]) -> tuple[Path, Path]:
     symbol_dir = out_dir / symbol
     symbol_dir.mkdir(parents=True, exist_ok=True)
 
@@ -118,7 +122,7 @@ def save_outputs(out_dir: Path, symbol: str, snapshots: pd.DataFrame) -> tuple[P
     snapshots.to_csv(raw_path, index=False)
 
     if snapshots.empty:
-        wide = pd.DataFrame(columns=["date", "15:45:00", "15:50:00", "15:54:00"])
+        wide = pd.DataFrame(columns=["date"] + snapshot_times)
     else:
         wide = snapshots.pivot_table(
             index="date",
@@ -127,7 +131,8 @@ def save_outputs(out_dir: Path, symbol: str, snapshots: pd.DataFrame) -> tuple[P
             aggfunc="last",
         ).reset_index()
         wide.columns.name = None
-        ordered = ["date", "15:45:00", "15:50:00", "15:54:00"]
+
+        ordered = ["date"] + snapshot_times
         for c in ordered:
             if c not in wide.columns:
                 wide[c] = pd.NA
@@ -141,7 +146,7 @@ def save_outputs(out_dir: Path, symbol: str, snapshots: pd.DataFrame) -> tuple[P
 
 def run(cfg: Config) -> None:
     cfg.out_dir.mkdir(parents=True, exist_ok=True)
-    ranges = chunk_ranges(cfg.start_date, cfg.end_date, chunk_days=30)
+    ranges = chunk_ranges(cfg.start_date, cfg.end_date, chunk_days=cfg.chunk_days)
     manifest_rows: list[dict] = []
 
     for symbol in cfg.symbols:
@@ -149,41 +154,51 @@ def run(cfg: Config) -> None:
         all_parts: list[pd.DataFrame] = []
 
         for idx, (start_dt, end_dt) in enumerate(ranges, start=1):
+            start_req = pd.Timestamp(f"{start_dt.date()} 15:40:00")
+            end_req = pd.Timestamp(f"{end_dt.date()} 16:00:00")
+
             print(
-                f"[{symbol}] chunk {idx}/{len(ranges)} {start_dt.date()} ~ {end_dt.date()}",
+                f"[{symbol}] chunk {idx}/{len(ranges)} {start_req} ~ {end_req}",
                 flush=True,
             )
+
             try:
                 chunk = fetch_chunk(
                     api_key=cfg.api_key,
                     symbol=symbol,
-                    start_dt=start_dt,
-                    end_dt=end_dt + pd.Timedelta(hours=23, minutes=59, seconds=59),
+                    start_dt=start_req,
+                    end_dt=end_req,
                     interval=cfg.interval,
                     timezone=cfg.timezone,
                     type_=cfg.type_,
                 )
-                all_parts.append(chunk)
+
+                if chunk.empty:
+                    status = "no_data"
+                else:
+                    status = "ok"
+                    all_parts.append(chunk)
+
                 manifest_rows.append(
                     {
                         "symbol": symbol,
-                        "chunk_start": str(start_dt.date()),
-                        "chunk_end": str(end_dt.date()),
+                        "chunk_start": str(start_req),
+                        "chunk_end": str(end_req),
                         "rows_raw": int(len(chunk)),
-                        "status": "ok",
+                        "status": status,
                     }
                 )
             except Exception as e:
                 manifest_rows.append(
                     {
                         "symbol": symbol,
-                        "chunk_start": str(start_dt.date()),
-                        "chunk_end": str(end_dt.date()),
+                        "chunk_start": str(start_req),
+                        "chunk_end": str(end_req),
                         "rows_raw": 0,
-                        "status": f"error: {e}",
+                        "status": f"api_error: {e}",
                     }
                 )
-                print(f"ERROR [{symbol} {start_dt.date()}~{end_dt.date()}] {e}", file=sys.stderr, flush=True)
+                print(f"ERROR [{symbol} {start_req}~{end_req}] {e}", file=sys.stderr, flush=True)
 
             if cfg.pause_seconds > 0:
                 time.sleep(cfg.pause_seconds)
@@ -195,7 +210,7 @@ def run(cfg: Config) -> None:
             raw = pd.DataFrame(columns=["datetime", "open", "high", "low", "close", "volume"])
 
         snaps = extract_snapshots(raw, symbol, cfg.snapshot_times)
-        raw_path, wide_path = save_outputs(cfg.out_dir, symbol, snaps)
+        raw_path, wide_path = save_outputs(cfg.out_dir, symbol, snaps, cfg.snapshot_times)
 
         print(f"[{symbol}] snapshots saved: {raw_path}", flush=True)
         print(f"[{symbol}] wide saved: {wide_path}", flush=True)
@@ -210,14 +225,15 @@ def parse_args() -> Config:
     parser = argparse.ArgumentParser()
     parser.add_argument("--api-key", required=True)
     parser.add_argument("--symbols", default="QQQ,SPY,SOXX")
-    parser.add_argument("--start-date", default="2022-04-01")
-    parser.add_argument("--end-date", default="2022-09-30")
+    parser.add_argument("--start-date", default="2020-01-01")
+    parser.add_argument("--end-date", default="2023-12-31")
     parser.add_argument("--interval", default="1min")
     parser.add_argument("--timezone", default="America/New_York")
     parser.add_argument("--out-dir", default="data/twelvedata_snapshots")
     parser.add_argument("--snapshot-times", default="15:45:00,15:50:00,15:54:00")
-    parser.add_argument("--pause-seconds", type=float, default=8.0)
+    parser.add_argument("--pause-seconds", type=float, default=10.0)
     parser.add_argument("--type", dest="type_", default="ETF")
+    parser.add_argument("--chunk-days", type=int, default=10)
     args = parser.parse_args()
 
     return Config(
@@ -230,7 +246,8 @@ def parse_args() -> Config:
         out_dir=Path(args.out_dir),
         snapshot_times=[x.strip() for x in args.snapshot_times.split(",") if x.strip()],
         pause_seconds=float(args.pause_seconds),
-        type_=args.type_,
+        type_=args.type_.strip(),
+        chunk_days=int(args.chunk_days),
     )
 
 
