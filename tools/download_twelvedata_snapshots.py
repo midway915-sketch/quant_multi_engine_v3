@@ -56,8 +56,8 @@ def fetch_chunk(
     params = {
         "symbol": symbol,
         "interval": interval,
-        "start_date": start_dt.strftime("%Y-%m-%d %H:%M:%S"),
-        "end_date": end_dt.strftime("%Y-%m-%d %H:%M:%S"),
+        "start_date": start_dt.strftime("%Y-%m-%dT%H:%M:%S"),
+        "end_date": end_dt.strftime("%Y-%m-%dT%H:%M:%S"),
         "timezone": timezone,
         "order": "ASC",
         "format": "JSON",
