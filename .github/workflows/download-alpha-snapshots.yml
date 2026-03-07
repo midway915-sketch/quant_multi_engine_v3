@@ -1,0 +1,109 @@
+name: download-alpha-snapshots
+
+on:
+  workflow_dispatch:
+    inputs:
+      symbols:
+        description: 'comma-separated symbols'
+        required: true
+        default: 'QQQ,SPY,SOXX,SGOV'
+      start_month:
+        description: 'YYYY-MM'
+        required: true
+        default: '2000-01'
+      end_month:
+        description: 'YYYY-MM'
+        required: true
+        default: '2026-03'
+      interval:
+        description: '1min | 5min | 15min | 30min | 60min'
+        required: true
+        default: '1min'
+      snapshot_times:
+        description: 'comma-separated ET times'
+        required: true
+        default: '15:45:00,15:50:00,15:54:00'
+      adjusted:
+        description: 'true or false'
+        required: true
+        default: 'false'
+      extended_hours:
+        description: 'true or false'
+        required: true
+        default: 'false'
+      sleep_seconds:
+        description: 'sleep between API calls'
+        required: true
+        default: '12.5'
+      out_dir:
+        description: 'output directory'
+        required: true
+        default: 'data/alpha_snapshots'
+
+jobs:
+  download:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      ALPHAVANTAGE_API_KEY: ${{ secrets.ALPHAVANTAGE_API_KEY }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas requests
+
+      - name: Validate secret
+        run: |
+          if [ -z "${ALPHAVANTAGE_API_KEY}" ]; then
+            echo "ALPHAVANTAGE_API_KEY secret is missing"
+            exit 1
+          fi
+
+      - name: Run snapshot downloader
+        run: |
+          mkdir -p "${{ inputs.out_dir }}"
+          CMD=(
+            python tools/download_alpha_snapshots.py
+            --symbols "${{ inputs.symbols }}"
+            --start-month "${{ inputs.start_month }}"
+            --end-month "${{ inputs.end_month }}"
+            --interval "${{ inputs.interval }}"
+            --snapshot-times "${{ inputs.snapshot_times }}"
+            --sleep-seconds "${{ inputs.sleep_seconds }}"
+            --out-dir "${{ inputs.out_dir }}"
+          )
+
+          if [ "${{ inputs.adjusted }}" = "true" ]; then
+            CMD+=(--adjusted)
+          fi
+
+          if [ "${{ inputs.extended_hours }}" = "true" ]; then
+            CMD+=(--extended-hours)
+          fi
+
+          "${CMD[@]}"
+
+      - name: Show manifest
+        run: |
+          if [ -f "${{ inputs.out_dir }}/manifest.csv" ]; then
+            python -c "import pandas as pd; df = pd.read_csv(r'${{ inputs.out_dir }}/manifest.csv'); print(df.head(20).to_string(index=False))"
+          else
+            echo "manifest.csv not found"
+          fi
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: alpha-snapshots-${{ github.run_number }}
+          if-no-files-found: error
+          path: |
+            ${{ inputs.out_dir }}/
