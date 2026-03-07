@@ -7,6 +7,46 @@ from pathlib import Path
 import pandas as pd
 
 
+def rank_summary(
+    summary: pd.DataFrame,
+    method: str,
+    balanced_mdd_weight: float,
+    balanced_recovery_weight: float,
+) -> pd.DataFrame:
+    method = str(method).lower().strip()
+    df = summary.copy()
+
+    required = {"cagr", "mdd", "max_recovery_days"}
+    missing = required - set(df.columns)
+    if missing:
+        raise ValueError(f"summary csv missing required columns: {sorted(missing)}")
+
+    if method == "cagr":
+        return df.sort_values(
+            by=["cagr", "mdd", "max_recovery_days"],
+            ascending=[False, False, True],
+        )
+
+    if method == "recovery":
+        return df.sort_values(
+            by=["max_recovery_days", "mdd", "cagr"],
+            ascending=[True, False, False],
+        )
+
+    if method == "balanced":
+        df["score_balanced"] = (
+            df["cagr"].astype(float)
+            - float(balanced_mdd_weight) * df["mdd"].astype(float).abs()
+            - float(balanced_recovery_weight) * df["max_recovery_days"].astype(float)
+        )
+        return df.sort_values(
+            by=["score_balanced", "cagr", "mdd", "max_recovery_days"],
+            ascending=[False, False, False, True],
+        )
+
+    raise ValueError(f"unsupported method: {method}")
+
+
 def find_equity_path_from_run_dir(run_dir: Path) -> Path:
     candidates = [
         run_dir / "equity_curve.csv",
@@ -62,20 +102,26 @@ def find_best_run_dir_by_summary_file(runs_root: Path, best_row: dict) -> Path:
 
 def main() -> None:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--summary-csv", required=True, help="기존 멀티엔진 merged summary csv")
-    parser.add_argument("--runs-root", required=True, help="run 결과 폴더 루트")
-    parser.add_argument("--out-json", required=True, help="best equity path json 출력 경로")
-    parser.add_argument("--run-dir-column", default="run_dir", help="summary csv 안 run 폴더 컬럼명")
+    parser.add_argument("--summary-csv", required=True)
+    parser.add_argument("--runs-root", required=True)
+    parser.add_argument("--out-json", required=True)
+    parser.add_argument("--run-dir-column", default="run_dir")
+    parser.add_argument("--method", default="cagr", choices=["cagr", "recovery", "balanced"])
+    parser.add_argument("--balanced-mdd-weight", type=float, default=0.35)
+    parser.add_argument("--balanced-recovery-weight", type=float, default=0.00015)
     args = parser.parse_args()
 
     summary = pd.read_csv(args.summary_csv)
     if summary.empty:
         raise ValueError("summary csv is empty")
 
-    best = summary.sort_values(
-        by=["cagr", "mdd", "max_recovery_days"],
-        ascending=[False, False, True],
-    ).iloc[0].to_dict()
+    ranked = rank_summary(
+        summary=summary,
+        method=args.method,
+        balanced_mdd_weight=args.balanced_mdd_weight,
+        balanced_recovery_weight=args.balanced_recovery_weight,
+    )
+    best = ranked.iloc[0].to_dict()
 
     runs_root = Path(args.runs_root)
     run_dir_col = args.run_dir_column
@@ -88,6 +134,9 @@ def main() -> None:
     equity_path = find_equity_path_from_run_dir(run_dir)
 
     payload = {
+        "selection_method": args.method,
+        "balanced_mdd_weight": float(args.balanced_mdd_weight),
+        "balanced_recovery_weight": float(args.balanced_recovery_weight),
         "best_params": best,
         "run_dir": str(run_dir),
         "equity_path": str(equity_path),
