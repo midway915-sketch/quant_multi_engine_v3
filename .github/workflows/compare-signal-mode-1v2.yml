@@ -3,18 +3,6 @@ name: compare-signal-mode-1v2
 on:
   workflow_dispatch:
     inputs:
-      prices_csv:
-        description: 'daily prices csv path'
-        required: true
-        default: 'data/prices.csv'
-      meta_config_yaml:
-        description: 'final fixed meta config yaml'
-        required: true
-        default: 'config/final_meta_fixed.yml'
-      snapshot_root:
-        description: 'root dir with QQQ/SPY/SOXX snapshot_closes_wide.csv'
-        required: true
-        default: 'data/twelvedata_snapshots'
       start_date:
         description: 'YYYY-MM-DD'
         required: true
@@ -23,6 +11,18 @@ on:
         description: 'YYYY-MM-DD'
         required: true
         default: '2024-12-31'
+      meta_config_yaml:
+        description: 'final fixed meta config yaml'
+        required: true
+        default: 'config/final_meta_fixed.yml'
+      snapshot_root:
+        description: 'root dir with QQQ/SPY/SOXX snapshot_closes_wide.csv'
+        required: true
+        default: 'data/twelvedata_snapshots'
+      prices_csv:
+        description: 'downloaded daily prices csv path'
+        required: true
+        default: 'data/prices.csv'
       out_dir:
         description: 'output directory'
         required: true
@@ -50,14 +50,18 @@ jobs:
           if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
           pip install pandas numpy pyyaml yfinance
 
-      - name: Validate input files
+      - name: Validate required files
         run: |
-          if [ ! -f "${{ inputs.prices_csv }}" ]; then
-            echo "missing prices csv: ${{ inputs.prices_csv }}"
-            exit 1
-          fi
           if [ ! -f "${{ inputs.meta_config_yaml }}" ]; then
             echo "missing meta config: ${{ inputs.meta_config_yaml }}"
+            exit 1
+          fi
+          if [ ! -f "tools/download_prices_yf_for_compare.py" ]; then
+            echo "missing script: tools/download_prices_yf_for_compare.py"
+            exit 1
+          fi
+          if [ ! -f "tools/compare_signal_mode_1v2.py" ]; then
+            echo "missing script: tools/compare_signal_mode_1v2.py"
             exit 1
           fi
           for sym in QQQ SPY SOXX; do
@@ -67,6 +71,23 @@ jobs:
               exit 1
             fi
           done
+
+      - name: Download yfinance daily prices
+        run: |
+          mkdir -p "$(dirname '${{ inputs.prices_csv }}')"
+          python tools/download_prices_yf_for_compare.py \
+            --start-date "${{ inputs.start_date }}" \
+            --end-date "${{ inputs.end_date }}" \
+            --out-csv "${{ inputs.prices_csv }}"
+
+      - name: Preview downloaded prices
+        run: |
+          if [ -f "${{ inputs.prices_csv }}" ]; then
+            python -c "import pandas as pd; df = pd.read_csv(r'${{ inputs.prices_csv }}'); print(df.head(10).to_string(index=False))"
+          else
+            echo "prices csv not found after download"
+            exit 1
+          fi
 
       - name: Run compare
         run: |
@@ -94,4 +115,5 @@ jobs:
           name: compare-signal-mode-1v2-${{ github.run_number }}
           if-no-files-found: error
           path: |
+            ${{ inputs.prices_csv }}
             ${{ inputs.out_dir }}/
