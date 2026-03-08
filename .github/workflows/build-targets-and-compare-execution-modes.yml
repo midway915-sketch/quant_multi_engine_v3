@@ -1,0 +1,129 @@
+name: build-targets-and-compare-execution-modes
+
+on:
+  workflow_dispatch:
+    inputs:
+      start_date:
+        description: 'YYYY-MM-DD'
+        required: true
+        default: '2021-01-01'
+      end_date:
+        description: 'YYYY-MM-DD'
+        required: true
+        default: '2024-12-31'
+      meta_config_yaml:
+        description: 'meta fixed config yaml'
+        required: true
+        default: 'config/final_meta_fixed.yml'
+      prices_csv:
+        description: 'downloaded daily prices csv path'
+        required: true
+        default: 'data/prices.csv'
+      meta_targets_csv:
+        description: 'meta target weights output'
+        required: true
+        default: 'out/meta_target_weights.csv'
+      branch_targets_csv:
+        description: 'branch target weights output'
+        required: true
+        default: 'out/branch5a_target_weights.csv'
+      final_targets_csv:
+        description: 'final target weights output'
+        required: true
+        default: 'out/final_target_weights.csv'
+      buy_cost:
+        description: 'buy cost fraction'
+        required: true
+        default: '0.0020'
+      sell_cost:
+        description: 'sell cost fraction'
+        required: true
+        default: '0.0020'
+      compare_out_dir:
+        description: 'compare output directory'
+        required: true
+        default: 'out/compare_execution_modes'
+
+jobs:
+  run:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+      PYTHONPATH: ${{ github.workspace }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
+          pip install pandas numpy pyyaml yfinance requests
+
+      - name: Validate files
+        run: |
+          if [ ! -f "${{ inputs.meta_config_yaml }}" ]; then
+            echo "missing meta config: ${{ inputs.meta_config_yaml }}"
+            exit 1
+          fi
+          if [ ! -f "scripts/build_final_target_weights_auto.py" ]; then
+            echo "missing script: scripts/build_final_target_weights_auto.py"
+            exit 1
+          fi
+          if [ ! -f "scripts/compare_execution_modes.py" ]; then
+            echo "missing script: scripts/compare_execution_modes.py"
+            exit 1
+          fi
+
+      - name: Build prices and target weights
+        run: |
+          mkdir -p out data
+          python scripts/build_final_target_weights_auto.py \
+            --start-date "${{ inputs.start_date }}" \
+            --end-date "${{ inputs.end_date }}" \
+            --meta-config-yaml "${{ inputs.meta_config_yaml }}" \
+            --prices-out-csv "${{ inputs.prices_csv }}" \
+            --meta-out-csv "${{ inputs.meta_targets_csv }}" \
+            --branch-out-csv "${{ inputs.branch_targets_csv }}" \
+            --final-out-csv "${{ inputs.final_targets_csv }}"
+
+      - name: Preview final target weights
+        run: |
+          python -c "import pandas as pd; df = pd.read_csv(r'${{ inputs.final_targets_csv }}'); print(df.head(20).to_string(index=False)); print(); print(df.tail(20).to_string(index=False))"
+
+      - name: Run execution mode compare
+        run: |
+          mkdir -p "${{ inputs.compare_out_dir }}"
+          python scripts/compare_execution_modes.py \
+            --prices-csv "${{ inputs.prices_csv }}" \
+            --targets-csv "${{ inputs.final_targets_csv }}" \
+            --start-date "${{ inputs.start_date }}" \
+            --end-date "${{ inputs.end_date }}" \
+            --buy-cost "${{ inputs.buy_cost }}" \
+            --sell-cost "${{ inputs.sell_cost }}" \
+            --out-dir "${{ inputs.compare_out_dir }}"
+
+      - name: Show summary
+        run: |
+          python -c "import pandas as pd; df = pd.read_csv(r'${{ inputs.compare_out_dir }}/summary.csv'); print(df.to_string(index=False))"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: build-targets-and-compare-execution-modes-${{ github.run_number }}
+          if-no-files-found: error
+          path: |
+            ${{ inputs.prices_csv }}
+            ${{ inputs.meta_targets_csv }}
+            ${{ inputs.branch_targets_csv }}
+            ${{ inputs.final_targets_csv }}
+            out/meta_log_debug.csv
+            out/meta_log_debug_unparsed.csv
+            out/build_final_target_weights_info.json
+            ${{ inputs.compare_out_dir }}/
