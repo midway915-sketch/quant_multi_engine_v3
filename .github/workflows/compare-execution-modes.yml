@@ -1,0 +1,88 @@
+name: compare-execution-modes
+
+on:
+  workflow_dispatch:
+    inputs:
+      prices_csv:
+        description: 'daily prices csv path'
+        required: true
+        default: 'data/prices.csv'
+      targets_csv:
+        description: 'daily final target weights csv path'
+        required: true
+        default: 'out/final_target_weights.csv'
+      start_date:
+        description: 'YYYY-MM-DD (optional)'
+        required: false
+        default: ''
+      end_date:
+        description: 'YYYY-MM-DD (optional)'
+        required: false
+        default: ''
+      buy_cost:
+        description: 'buy cost fraction'
+        required: true
+        default: '0.0020'
+      sell_cost:
+        description: 'sell cost fraction'
+        required: true
+        default: '0.0020'
+      out_dir:
+        description: 'output directory'
+        required: true
+        default: 'out/compare_execution_modes'
+
+jobs:
+  compare:
+    runs-on: ubuntu-latest
+    env:
+      PYTHONUNBUFFERED: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pandas numpy
+
+      - name: Validate input files
+        run: |
+          if [ ! -f "${{ inputs.prices_csv }}" ]; then
+            echo "missing prices csv: ${{ inputs.prices_csv }}"
+            exit 1
+          fi
+          if [ ! -f "${{ inputs.targets_csv }}" ]; then
+            echo "missing targets csv: ${{ inputs.targets_csv }}"
+            exit 1
+          fi
+
+      - name: Run compare
+        run: |
+          mkdir -p "${{ inputs.out_dir }}"
+          python scripts/compare_execution_modes.py \
+            --prices-csv "${{ inputs.prices_csv }}" \
+            --targets-csv "${{ inputs.targets_csv }}" \
+            --start-date "${{ inputs.start_date }}" \
+            --end-date "${{ inputs.end_date }}" \
+            --buy-cost "${{ inputs.buy_cost }}" \
+            --sell-cost "${{ inputs.sell_cost }}" \
+            --out-dir "${{ inputs.out_dir }}"
+
+      - name: Show summary
+        run: |
+          python -c "import pandas as pd; df = pd.read_csv(r'${{ inputs.out_dir }}/summary.csv'); print(df.to_string(index=False))"
+
+      - name: Upload artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: compare-execution-modes-${{ github.run_number }}
+          if-no-files-found: error
+          path: |
+            ${{ inputs.out_dir }}/
