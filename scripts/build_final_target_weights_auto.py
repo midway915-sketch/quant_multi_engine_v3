@@ -42,11 +42,7 @@ def unwrap_singletons(obj: Any) -> Any:
 
 def load_run_meta_portfolio():
     candidates = [
-        Path("src/engine/meta.py"),
-        Path("src/engine/meta_portfolio.py"),
-        Path("src/meta.py"),
-        Path("src/strategy/meta.py"),
-        Path("src/strategies/meta.py"),
+        Path("src/core/meta.py")
     ]
     for path in candidates:
         if not path.exists():
