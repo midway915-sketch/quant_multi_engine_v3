@@ -1,4 +1,3 @@
-
 from __future__ import annotations
 
 import argparse
@@ -188,7 +187,6 @@ def rebalance_buy_only(
     if cash_avail <= 0 or need_total <= 0:
         return out, 0.0
 
-    # buy cost 고려해서 실제 투입 가능한 금액
     gross_buy_cap = cash_avail / (1.0 + buy_cost)
     buy_turn = min(need_total, gross_buy_cap)
 
@@ -314,7 +312,6 @@ def simulate_mode2_sell_then_buy(
         sell_signal_date = ""
         buy_signal_date = ""
 
-        # D일 신호 -> D+1 매도
         if i >= 1:
             signal_dt_for_sell = idx[i - 1]
             target_sell = normalize_target(targets.loc[signal_dt_for_sell])
@@ -322,7 +319,6 @@ def simulate_mode2_sell_then_buy(
             equity *= (1.0 - sell_cost_frac)
             sell_signal_date = str(signal_dt_for_sell.date())
 
-        # D일 신호 -> D+2 매수
         if i >= 2:
             signal_dt_for_buy = idx[i - 2]
             target_buy = normalize_target(targets.loc[signal_dt_for_buy])
@@ -384,14 +380,8 @@ def main() -> None:
 
     summary = pd.DataFrame(
         [
-            {
-                "mode": "mode1_next_day_full",
-                **m1,
-            },
-            {
-                "mode": "mode2_next_day_sell_then_next_day_buy",
-                **m2,
-            },
+            {"mode": "mode1_next_day_full", **m1},
+            {"mode": "mode2_next_day_sell_then_next_day_buy", **m2},
             {
                 "mode": "delta_mode2_minus_mode1",
                 "cagr": m2["cagr"] - m1["cagr"],
